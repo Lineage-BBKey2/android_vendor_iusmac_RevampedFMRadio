@@ -734,7 +734,7 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      */
     private boolean openDevice() {
         if (!mIsDeviceOpen) {
-            mIsDeviceOpen = FmNative.openDev();
+            mIsDeviceOpen = FmNative.openDev(this);
         }
         return mIsDeviceOpen;
     }
@@ -2791,7 +2791,9 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                     }
 
                     // check whether cancel scan
-                    if ((null != stations) && stations[0] == -100) {
+                    if ((stations != null) &&
+                            (stations.length > 0) &&
+                            (stations[0] == -100)) {
                         isScan = false;
                         result = new int[] {
                                 -1, 0

@@ -28,11 +28,21 @@ LOCAL_CERTIFICATE := platform
 LOCAL_PRIVATE_PLATFORM_APIS := true
 LOCAL_PRIVILEGED_MODULE := true
 
-LOCAL_JNI_SHARED_LIBRARIES := libqcomfmjni
+# Qualcomm FM framework used by the Key2 FM backend
+LOCAL_JAVA_LIBRARIES += qcom.fmradio
+LOCAL_USES_LIBRARIES += qcom.fmradio
 
 LOCAL_REQUIRED_MODULES := \
     privapp_whitelist_com.android.fmradio_revamped.xml \
-    RevampedFmRecordingsProvider
+    RevampedFmRecordingsProvider \
+
+# Ensure the Qualcomm FM framework/JNI runtime pieces are installed.
+# libqcomfm_jni is a system_ext library, so don't use
+# LOCAL_JNI_SHARED_LIBRARIES from this /system app.
+LOCAL_REQUIRED_MODULES += \
+    qcom.fmradio \
+    qcom.fmradio.xml \
+    libqcomfm_jni
 
 LOCAL_STATIC_ANDROID_LIBRARIES := \
     androidx.cardview_cardview
