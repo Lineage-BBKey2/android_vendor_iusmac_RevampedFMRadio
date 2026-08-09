@@ -17,6 +17,8 @@
 package com.android.fmradio;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -97,6 +99,224 @@ public class FmNative {
 
     private static byte[] sPs = new byte[0];
     private static byte[] sRt = new byte[0];
+
+    /*
+     * Qualcomm can report an incomplete PS value shortly before a corrected
+     * version of the same eight-character PS string. Hold each new PS briefly
+     * so a completion such as "Sprock  " -> "Sprocket" can replace the
+     * incomplete value before RevampedFMRadio sees it.
+     *
+     * Genuinely different PS strings are not combined.
+     */
+    private static final long PS_STABILIZE_MS = 2000;
+
+    private static final Handler PS_HANDLER =
+            new Handler(Looper.getMainLooper());
+
+    private static String sPendingPs;
+    private static String sPublishedPs;
+
+    private static final Runnable PS_PUBLISH_RUNNABLE = () -> {
+        synchronized (EVENT_LOCK) {
+            publishPendingPsLocked();
+        }
+    };
+
+    /*
+     * Treat only characters that have actually appeared as missing/corrupt
+     * RDS data as holes which a later PS callback may fill.
+     *
+     * Do not treat every kind of whitespace as invalid: ordinary spaces are
+     * legitimate characters in an eight-character Program Service string.
+     * They are considered "missing" only while comparing two otherwise
+     * compatible PS values.
+     */
+    private static boolean isMissingPsChar(char c) {
+        return c == ' ' ||
+                c == '\0' ||
+                c == '\uFFFD';
+    }
+
+    /*
+     * Return true only when 'newer' is a more complete version of 'older'.
+     *
+     * All existing non-missing characters must remain identical. The only
+     * permitted differences are positions where the older value had a
+     * missing character and the newer value supplies a real character.
+     */
+    private static boolean isPsCompletion(String older, String newer) {
+        if (older == null ||
+                newer == null ||
+                older.length() != newer.length()) {
+            return false;
+        }
+
+        boolean filledCharacter = false;
+
+        for (int i = 0; i < older.length(); i++) {
+            char oldChar = older.charAt(i);
+            char newChar = newer.charAt(i);
+
+            if (oldChar == newChar) {
+                continue;
+            }
+
+            /*
+             * A correction may only fill a position which was previously
+             * missing. It must never replace one real character with another
+             * or remove a character which was already present.
+             */
+            if (isMissingPsChar(oldChar) &&
+                    !isMissingPsChar(newChar)) {
+                filledCharacter = true;
+                continue;
+            }
+
+            return false;
+        }
+
+        return filledCharacter;
+    }
+
+    /*
+     * Publish the pending PS to RevampedFMRadio.
+     *
+     * EVENT_LOCK must already be held.
+     */
+    private static void publishPendingPsLocked() {
+        if (sPendingPs == null) {
+            return;
+        }
+
+        /*
+         * If this is being published early because a different PS frame
+         * arrived, cancel the old delayed callback. This is harmless when
+         * called by PS_PUBLISH_RUNNABLE itself.
+         */
+        PS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
+
+        String ps = sPendingPs;
+        sPendingPs = null;
+
+        /*
+         * Do not wake Revamped's RDS polling thread for an exact duplicate
+         * of the value it already consumed.
+         */
+        if (ps.equals(sPublishedPs)) {
+            Log.d(TAG, "RDS PS duplicate suppressed: [" + ps + "]");
+            return;
+        }
+
+        sPublishedPs = ps;
+        sPs = ps.getBytes(StandardCharsets.UTF_8);
+        sRdsEvents |= RDS_EVT_PS_UPDATE;
+
+        Log.d(TAG, "RDS PS publish: [" + ps + "]");
+    }
+
+    /*
+     * Queue a Qualcomm PS callback for stabilization.
+     *
+     * A new PS is held for at most PS_STABILIZE_MS. If a more complete
+     * version arrives during that window, replace the pending value without
+     * restarting the timer.
+     *
+     * If a genuinely different PS string arrives, publish the previous
+     * value immediately and begin a new stabilization window for the new
+     * frame.
+     */
+    private static void queuePsUpdate(String ps) {
+        synchronized (EVENT_LOCK) {
+            /*
+             * If Qualcomm returns to the value which is already displayed
+             * while another value is still pending, consider the pending
+             * value transient and discard it.
+             */
+            if (ps.equals(sPublishedPs)) {
+                if (sPendingPs != null &&
+                        !sPendingPs.equals(ps)) {
+                    Log.d(TAG, "RDS PS transient discarded: [" +
+                            sPendingPs + "]");
+
+                    PS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
+                    sPendingPs = null;
+                }
+
+                Log.d(TAG, "RDS PS duplicate suppressed: [" + ps + "]");
+                return;
+            }
+
+            /*
+             * First value in a new stabilization window.
+             */
+            if (sPendingPs == null) {
+                sPendingPs = ps;
+
+                PS_HANDLER.postDelayed(
+                        PS_PUBLISH_RUNNABLE,
+                        PS_STABILIZE_MS);
+
+                return;
+            }
+
+            /*
+             * An identical callback adds no information. Keep the original
+             * deadline instead of extending the stabilization window.
+             */
+            if (ps.equals(sPendingPs)) {
+                return;
+            }
+
+            /*
+             * The newer value filled one or more holes without changing any
+             * existing real characters. Keep the corrected value, but retain
+             * the original deadline.
+             */
+            if (isPsCompletion(sPendingPs, ps)) {
+                Log.d(TAG, "RDS PS completion: [" +
+                        sPendingPs + "] -> [" + ps + "]");
+
+                sPendingPs = ps;
+                return;
+            }
+
+            /*
+             * If the new callback is merely a less-complete version of the
+             * value we are already holding, ignore the regression.
+             */
+            if (isPsCompletion(ps, sPendingPs)) {
+                Log.d(TAG, "RDS PS regression ignored: [" +
+                        ps + "]");
+
+                return;
+            }
+
+            /*
+             * This is a genuinely different PS frame. Do not merge it with
+             * the previous one. Publish the previous pending value now and
+             * start a fresh stabilization window.
+             */
+            publishPendingPsLocked();
+
+            sPendingPs = ps;
+
+            PS_HANDLER.postDelayed(
+                    PS_PUBLISH_RUNNABLE,
+                    PS_STABILIZE_MS);
+        }
+    }
+
+    /*
+     * Clear both pending and already-published PS state.
+     *
+     * EVENT_LOCK must already be held.
+     */
+    private static void resetPsStabilizerLocked() {
+        PS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
+
+        sPendingPs = null;
+        sPublishedPs = null;
+    }
 
     private static final FmRxEvCallbacksAdaptor sCallbacks =
             new FmRxEvCallbacksAdaptor() {
@@ -186,28 +406,30 @@ public class FmNative {
         public void FmRxEvRdsPsInfo() {
             Log.d(TAG, "FmRxEvRdsPsInfo");
 
-                final FmReceiver receiver = sReceiver;
-                if (receiver == null) {
-                    return;
-                }
-
-                FmRxRdsData data = receiver.getPSInfo();
-                if (data == null) {
-                    return;
-                }
-
-                String ps = data.getPrgmServices();
-                if (ps == null) {
-                    ps = "";
-                }
-
-                synchronized (EVENT_LOCK) {
-                    sPs = ps.getBytes(StandardCharsets.UTF_8);
-                    sRdsEvents |= RDS_EVT_PS_UPDATE;
-                }
-
-                Log.d(TAG, "RDS PS: [" + ps + "]");
+            final FmReceiver receiver = sReceiver;
+            if (receiver == null) {
+                return;
             }
+
+            FmRxRdsData data = receiver.getPSInfo();
+            if (data == null) {
+                return;
+            }
+
+            String ps = data.getPrgmServices();
+            if (ps == null) {
+                ps = "";
+            }
+
+            /*
+             * Log the exact value returned by Qualcomm before stabilization so
+             * runtime testing can distinguish backend corruption from the value
+             * eventually exposed to RevampedFMRadio.
+             */
+            Log.d(TAG, "RDS PS raw: [" + ps + "]");
+
+            queuePsUpdate(ps);
+        }
 
             public void FmRxEvRdsRtInfo() {
                 Log.d(TAG, "FmRxEvRdsRtInfo");
@@ -872,6 +1094,8 @@ public class FmNative {
              * FmReceiver.disable() tears the FM/RDS HAL down completely.
              */
             synchronized (EVENT_LOCK) {
+                resetPsStabilizerLocked();
+
                 sRdsEvents = 0;
                 sPs = new byte[0];
                 sRt = new byte[0];
