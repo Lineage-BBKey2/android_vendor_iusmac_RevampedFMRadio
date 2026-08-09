@@ -57,6 +57,7 @@ public class FmNative {
 
     private static Context sContext;
     private static FmReceiver sReceiver;
+    private static FmConfig sFmConfig;
 
     private static boolean sEnableDone;
     private static boolean sDisableDone;
@@ -64,10 +65,20 @@ public class FmNative {
     private static boolean sAutoScanInProgress;
     private static boolean sAutoScanDone;
 
+    /*
+     * Qualcomm's seek/scan engine must begin on the channel raster selected
+     * by FmConfig. Direct tuning can use intermediate frequencies, so an
+     * off-raster tune may need to be moved temporarily before a search.
+     */
+    private static boolean sTuneWaitInProgress;
+    private static boolean sTuneDone;
+
     private static int sSearchFrequencyKhz;
     private static int sCurrentFrequencyKhz;
+    private static int sTuneTargetKhz;
 
     private static final long POWER_TIMEOUT_MS = 5000;
+    private static final long TUNE_TIMEOUT_MS = 5000;
     private static final long SEARCH_TIMEOUT_MS = 15000;
 
     private static final LinkedHashSet<Integer> sAutoScanStationsKhz =
@@ -110,14 +121,28 @@ public class FmNative {
         public void FmRxEvRadioTuneStatus(int frequency) {
             Log.d(TAG, "FmRxEvRadioTuneStatus: " + frequency);
 
-            sCurrentFrequencyKhz = frequency;
-
             synchronized (EVENT_LOCK) {
+                sCurrentFrequencyKhz = frequency;
+
+                /*
+                 * An off-raster seek/scan first performs a temporary tune to a
+                 * valid search-raster frequency. Do not start the search until
+                 * Qualcomm confirms that tune has completed.
+                 */
+                if (sTuneWaitInProgress && frequency == sTuneTargetKhz) {
+                    Log.d(TAG, "Search-raster tune complete: " +
+                            frequency + " kHz");
+
+                    sTuneDone = true;
+                    sTuneWaitInProgress = false;
+                    EVENT_LOCK.notifyAll();
+                }
+
                 if (sAutoScanInProgress &&
-                        frequency >= 87500 &&
-                        frequency <= 107900) {
+                        isFrequencyInConfiguredBand(frequency)) {
                     if (sAutoScanStationsKhz.add(frequency)) {
-                        Log.d(TAG, "autoScan station: " + frequency + " kHz");
+                        Log.d(TAG, "autoScan station: " +
+                                frequency + " kHz");
                     }
                 }
             }
@@ -328,6 +353,163 @@ public class FmNative {
         return true;
     }
 
+    private static int getSearchSpacingKhz() {
+        if (sFmConfig == null) {
+            Log.e(TAG, "No active FM configuration");
+            return 0;
+        }
+
+        switch (sFmConfig.getChSpacing()) {
+            case FmReceiver.FM_CHSPACE_200_KHZ:
+                return 200;
+
+            case FmReceiver.FM_CHSPACE_100_KHZ:
+                return 100;
+
+            case FmReceiver.FM_CHSPACE_50_KHZ:
+                return 50;
+
+            default:
+                Log.e(TAG, "Unknown FM channel spacing: " +
+                        sFmConfig.getChSpacing());
+                return 0;
+        }
+    }
+
+    private static boolean isFrequencyInConfiguredBand(int frequencyKhz) {
+        return sFmConfig != null &&
+                frequencyKhz >= sFmConfig.getLowerLimit() &&
+                frequencyKhz <= sFmConfig.getUpperLimit();
+    }
+
+    /*
+     * Return a valid starting frequency for Qualcomm's seek/scan engine.
+     *
+     * The raster is anchored at the configured lower band limit and uses
+     * the channel spacing selected in FmConfig.
+     *
+     * When an off-raster frequency must be normalized, choose the valid
+     * raster frequency opposite the requested search direction:
+     *
+     *   seek up:   100.0 -> 99.9 with the US 200 kHz raster
+     *   seek down: 100.0 -> 100.1 with the US 200 kHz raster
+     *
+     * This prevents the first valid channel in the requested direction
+     * from being skipped.
+     */
+    private static int getSearchRasterFrequency(
+            int frequencyKhz, boolean searchUp) {
+        if (sFmConfig == null) {
+            return frequencyKhz;
+        }
+
+        final int lowerKhz = sFmConfig.getLowerLimit();
+        final int upperKhz = sFmConfig.getUpperLimit();
+        final int spacingKhz = getSearchSpacingKhz();
+
+        if (spacingKhz <= 0) {
+            return frequencyKhz;
+        }
+
+        int frequency = Math.max(lowerKhz,
+                Math.min(upperKhz, frequencyKhz));
+
+        int offset = frequency - lowerKhz;
+        int remainder = offset % spacingKhz;
+
+        /*
+         * Already on the configured search raster.
+         */
+        if (remainder == 0) {
+            return frequency;
+        }
+
+        int rasterFrequency;
+
+        if (searchUp) {
+            /*
+             * Start immediately below an off-raster frequency so the first
+             * valid station above the user's frequency remains searchable.
+             */
+            rasterFrequency = frequency - remainder;
+        } else {
+            /*
+             * Start immediately above an off-raster frequency so the first
+             * valid station below the user's frequency remains searchable.
+             */
+            rasterFrequency =
+                    frequency + (spacingKhz - remainder);
+        }
+
+        return Math.max(lowerKhz,
+                Math.min(upperKhz, rasterFrequency));
+    }
+
+    private static boolean waitForTune() {
+        final long deadline =
+                SystemClock.elapsedRealtime() + TUNE_TIMEOUT_MS;
+
+        synchronized (EVENT_LOCK) {
+            while (!sTuneDone) {
+                long remaining =
+                        deadline - SystemClock.elapsedRealtime();
+
+                if (remaining <= 0) {
+                    Log.e(TAG, "Timed out waiting for FM tune");
+                    return false;
+                }
+
+                try {
+                    EVENT_LOCK.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static boolean tuneAndWait(int frequencyKhz) {
+        if (sReceiver == null) {
+            return false;
+        }
+
+        synchronized (EVENT_LOCK) {
+            sTuneTargetKhz = frequencyKhz;
+            sTuneDone = false;
+            sTuneWaitInProgress = true;
+        }
+
+        Log.d(TAG, "Temporary search-raster tune: " +
+                frequencyKhz + " kHz");
+
+        if (!sReceiver.setStation(frequencyKhz)) {
+            Log.e(TAG, "Unable to start search-raster tune");
+
+            synchronized (EVENT_LOCK) {
+                sTuneWaitInProgress = false;
+                sTuneTargetKhz = 0;
+            }
+
+            return false;
+        }
+
+        boolean completed = waitForTune();
+
+        synchronized (EVENT_LOCK) {
+            sTuneWaitInProgress = false;
+            sTuneTargetKhz = 0;
+        }
+
+        if (!completed) {
+            Log.e(TAG, "Search-raster tune did not complete");
+        }
+
+        return completed;
+    }
+
     private static boolean createReceiverIfNeeded() {
         if (sReceiver != null) {
             return true;
@@ -363,6 +545,8 @@ public class FmNative {
         Log.d(TAG, "closeDev");
 
         sReceiver = null;
+        sFmConfig = null;
+        sCurrentFrequencyKhz = 0;
         sContext = null;
 
         return true;
@@ -407,10 +591,11 @@ public class FmNative {
             sEnableDone = false;
         }
 
-        FmConfig config = createConfig();
+        sFmConfig = createConfig();
 
-        if (!sReceiver.enable(config, sContext)) {
+        if (!sReceiver.enable(sFmConfig, sContext)) {
             Log.e(TAG, "FmReceiver.enable returned false");
+            sFmConfig = null;
             return false;
         }
 
@@ -460,7 +645,10 @@ public class FmNative {
              * enable.
              */
             Log.d(TAG, "FM disabled; discarding FmReceiver for re-init");
+
             sReceiver = null;
+            sFmConfig = null;
+            sCurrentFrequencyKhz = 0;
         }
 
         return disabled;
@@ -489,6 +677,32 @@ public class FmNative {
             return 0.0f;
         }
 
+        int startFrequencyKhz =
+                Math.round(frequency * 1000.0f);
+
+        int searchFrequencyKhz =
+                getSearchRasterFrequency(startFrequencyKhz, isUp);
+
+        /*
+         * Direct tuning can place Qualcomm on a frequency that isn't part of
+         * the configured search raster. Move temporarily onto the raster
+         * before issuing SEEK.
+         */
+        if (searchFrequencyKhz != startFrequencyKhz) {
+            Log.d(TAG, "seek: normalizing off-raster start " +
+                    startFrequencyKhz + " -> " +
+                    searchFrequencyKhz + " kHz");
+
+            if (!tuneAndWait(searchFrequencyKhz)) {
+                Log.e(TAG, "Unable to prepare tuner for seek");
+                return 0.0f;
+            }
+        }
+
+        /*
+         * Reset search state after the optional raster tune so its tune
+         * callback remains separate from the actual seek operation.
+         */
         synchronized (EVENT_LOCK) {
             sSearchDone = false;
             sSearchFrequencyKhz = 0;
@@ -498,7 +712,9 @@ public class FmNative {
                 ? FmReceiver.FM_RX_SEARCHDIR_UP
                 : FmReceiver.FM_RX_SEARCHDIR_DOWN;
 
-        Log.d(TAG, "seek: " + (isUp ? "up" : "down"));
+        Log.d(TAG, "seek: " +
+                (isUp ? "up" : "down") +
+                " from " + searchFrequencyKhz + " kHz");
 
         boolean started = sReceiver.searchStations(
                 FmReceiver.FM_RX_SRCH_MODE_SEEK,
@@ -532,13 +748,52 @@ public class FmNative {
             return null;
         }
 
+        int currentFrequencyKhz = sCurrentFrequencyKhz;
+
+        /*
+         * This should normally already contain the current tuner frequency.
+         * Fall back to the configured lower band limit if it doesn't.
+         */
+        if (currentFrequencyKhz <= 0) {
+            if (sFmConfig == null) {
+                Log.e(TAG, "autoScan: no active FM configuration");
+                return null;
+            }
+
+            currentFrequencyKhz = sFmConfig.getLowerLimit();
+        }
+
+        /*
+         * Qualcomm SCAN runs upward, so normalize an off-raster starting
+         * frequency to the valid raster frequency immediately below it.
+         */
+        int scanStartFrequencyKhz =
+                getSearchRasterFrequency(currentFrequencyKhz, true);
+
+        if (scanStartFrequencyKhz != currentFrequencyKhz) {
+            Log.d(TAG, "autoScan: normalizing off-raster start " +
+                    currentFrequencyKhz + " -> " +
+                    scanStartFrequencyKhz + " kHz");
+
+            if (!tuneAndWait(scanStartFrequencyKhz)) {
+                Log.e(TAG, "Unable to prepare tuner for auto scan");
+                return null;
+            }
+        }
+
+        /*
+         * Do not mark the scan active until the temporary raster tune is
+         * complete. Otherwise FmRxEvRadioTuneStatus for the temporary tune
+         * would be mistaken for a discovered station.
+         */
         synchronized (EVENT_LOCK) {
             sAutoScanStationsKhz.clear();
             sAutoScanDone = false;
             sAutoScanInProgress = true;
         }
 
-        Log.d(TAG, "autoScan: starting Qualcomm scan");
+        Log.d(TAG, "autoScan: starting Qualcomm scan from " +
+                scanStartFrequencyKhz + " kHz");
 
         boolean started = sReceiver.searchStations(
                 FmReceiver.FM_RX_SRCH_MODE_SCAN,
