@@ -110,15 +110,30 @@ public class FmNative {
      */
     private static final long PS_STABILIZE_MS = 2000;
 
-    private static final Handler PS_HANDLER =
+    /*
+     * RadioText is commonly delivered as a rapidly growing series of partial
+     * strings. Publish only after the callback stream has been quiet briefly.
+     */
+    private static final long RT_STABILIZE_MS = 1000;
+
+    private static final Handler RDS_HANDLER =
             new Handler(Looper.getMainLooper());
 
     private static String sPendingPs;
     private static String sPublishedPs;
 
+    private static String sPendingRt;
+    private static String sPublishedRt;
+
     private static final Runnable PS_PUBLISH_RUNNABLE = () -> {
         synchronized (EVENT_LOCK) {
             publishPendingPsLocked();
+        }
+    };
+
+    private static final Runnable RT_PUBLISH_RUNNABLE = () -> {
+        synchronized (EVENT_LOCK) {
+            publishPendingRtLocked();
         }
     };
 
@@ -193,7 +208,7 @@ public class FmNative {
          * arrived, cancel the old delayed callback. This is harmless when
          * called by PS_PUBLISH_RUNNABLE itself.
          */
-        PS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
+        RDS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
 
         String ps = sPendingPs;
         sPendingPs = null;
@@ -238,7 +253,7 @@ public class FmNative {
                     Log.d(TAG, "RDS PS transient discarded: [" +
                             sPendingPs + "]");
 
-                    PS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
+                    RDS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
                     sPendingPs = null;
                 }
 
@@ -252,7 +267,7 @@ public class FmNative {
             if (sPendingPs == null) {
                 sPendingPs = ps;
 
-                PS_HANDLER.postDelayed(
+                RDS_HANDLER.postDelayed(
                         PS_PUBLISH_RUNNABLE,
                         PS_STABILIZE_MS);
 
@@ -300,7 +315,7 @@ public class FmNative {
 
             sPendingPs = ps;
 
-            PS_HANDLER.postDelayed(
+            RDS_HANDLER.postDelayed(
                     PS_PUBLISH_RUNNABLE,
                     PS_STABILIZE_MS);
         }
@@ -312,10 +327,95 @@ public class FmNative {
      * EVENT_LOCK must already be held.
      */
     private static void resetPsStabilizerLocked() {
-        PS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
+        RDS_HANDLER.removeCallbacks(PS_PUBLISH_RUNNABLE);
 
         sPendingPs = null;
         sPublishedPs = null;
+    }
+
+    /*
+     * Publish the pending RadioText to RevampedFMRadio.
+     *
+     * EVENT_LOCK must already be held.
+     */
+    private static void publishPendingRtLocked() {
+        if (sPendingRt == null) {
+            return;
+        }
+
+        RDS_HANDLER.removeCallbacks(RT_PUBLISH_RUNNABLE);
+
+        String rt = sPendingRt;
+        sPendingRt = null;
+
+        /*
+         * Do not wake Revamped's RDS polling thread for an exact duplicate
+         * of the RadioText it has already received.
+         */
+        if (rt.equals(sPublishedRt)) {
+            Log.d(TAG, "RDS RT duplicate suppressed: [" + rt + "]");
+            return;
+        }
+
+        sPublishedRt = rt;
+        sRt = rt.getBytes(StandardCharsets.UTF_8);
+        sRdsEvents |= RDS_EVT_RT_UPDATE;
+
+        Log.d(TAG, "RDS RT publish: [" + rt + "]");
+    }
+
+    /*
+     * Queue a Qualcomm RadioText callback for quiet-period stabilization.
+     *
+     * Unlike PS, RadioText does not need character-by-character correction.
+     * Each genuinely new value replaces the pending value and restarts the
+     * timer. The latest value is published once the callback stream has
+     * remained quiet for RT_STABILIZE_MS.
+     */
+    private static void queueRtUpdate(String rt) {
+        synchronized (EVENT_LOCK) {
+            /*
+             * An identical pending callback adds no new information and
+             * should not extend the quiet-period timer.
+             */
+            if (rt.equals(sPendingRt)) {
+                return;
+            }
+
+            /*
+             * If there is no pending update and this is identical to the
+             * value already published, suppress it immediately.
+             */
+            if (sPendingRt == null &&
+                    rt.equals(sPublishedRt)) {
+                Log.d(TAG, "RDS RT duplicate suppressed: [" + rt + "]");
+                return;
+            }
+
+            sPendingRt = rt;
+
+            /*
+             * A genuinely new RadioText value restarts the quiet-period
+             * timer. Rapid progressive updates therefore collapse into the
+             * final value in the sequence.
+             */
+            RDS_HANDLER.removeCallbacks(RT_PUBLISH_RUNNABLE);
+            RDS_HANDLER.postDelayed(
+                    RT_PUBLISH_RUNNABLE,
+                    RT_STABILIZE_MS);
+        }
+    }
+
+    /*
+     * Clear pending and published RadioText stabilization state.
+     *
+     * EVENT_LOCK must already be held.
+     */
+    private static void resetRtStabilizerLocked() {
+        RDS_HANDLER.removeCallbacks(RT_PUBLISH_RUNNABLE);
+
+        sPendingRt = null;
+        sPublishedRt = null;
     }
 
     private static final FmRxEvCallbacksAdaptor sCallbacks =
@@ -449,12 +549,12 @@ public class FmNative {
                     rt = "";
                 }
 
-                synchronized (EVENT_LOCK) {
-                    sRt = rt.getBytes(StandardCharsets.UTF_8);
-                    sRdsEvents |= RDS_EVT_RT_UPDATE;
-                }
+                /*
+                 * Log the exact RadioText returned by Qualcomm before stabilization.
+                 */
+                Log.d(TAG, "RDS RT raw: [" + rt + "]");
 
-                Log.d(TAG, "RDS RT: [" + rt + "]");
+                queueRtUpdate(rt);
             }
 
             public void FmRxEvRdsAfInfo() {
@@ -1095,6 +1195,7 @@ public class FmNative {
              */
             synchronized (EVENT_LOCK) {
                 resetPsStabilizerLocked();
+                resetRtStabilizerLocked();
 
                 sRdsEvents = 0;
                 sPs = new byte[0];
