@@ -1189,10 +1189,12 @@ public class FmNative {
 
         if (!rdson) {
             /*
-             * Revamped calls this immediately before powerDown().
-             * Clear our pending compatibility-layer state; the following
-             * FmReceiver.disable() tears the FM/RDS HAL down completely.
+             * Revamped may disable RDS without powering the FM receiver down,
+             * such as around a seek or tune. Stop Qualcomm's RDS processing so
+             * stale decoder state is not carried across the transition.
              */
+            boolean result = sReceiver.unregisterRdsGroupProcessing();
+
             synchronized (EVENT_LOCK) {
                 resetPsStabilizerLocked();
                 resetRtStabilizerLocked();
@@ -1202,8 +1204,8 @@ public class FmNative {
                 sRt = new byte[0];
             }
 
-            Log.d(TAG, "setRds(false)");
-            return 0;
+            Log.d(TAG, "setRds(false): " + result);
+            return result ? 0 : -1;
         }
 
         final int groups =
