@@ -877,21 +877,47 @@ public class FmNative {
     private static FmConfig createConfig() {
         FmConfig config = new FmConfig();
 
-        /*
-         * Initial Athena test configuration.
-         *
-         * This matches the known-working FM2 North American configuration:
-         * 87.5 - 107.9 MHz, 200 kHz spacing, 75 us de-emphasis, RBDS.
-         *
-         * This should later be replaced with regional configuration using
-         * RevampedFMRadio's selected band/country.
-         */
-        config.setRadioBand(FmReceiver.FM_US_BAND);
-        config.setEmphasis(FmReceiver.FM_DE_EMP75);
-        config.setChSpacing(FmReceiver.FM_CHSPACE_200_KHZ);
-        config.setRdsStd(FmReceiver.FM_RDS_STD_RBDS);
-        config.setLowerLimit(87500);
-        config.setUpperLimit(107900);
+        int region = FmUtils.getFmRegion(sContext);
+
+        if (region == FmUtils.FM_REGION_WORLD_EUROPE) {
+            /*
+             * General international configuration supported by Revamped's
+             * existing 100 kHz station representation.
+             *
+             * This deliberately does not claim support for regional profiles
+             * requiring 50 kHz precision or band limits below 87.5 MHz.
+             */
+            config.setRadioBand(
+                    FmReceiver.FM_USER_DEFINED_BAND);
+            config.setEmphasis(
+                    FmReceiver.FM_DE_EMP50);
+            config.setChSpacing(
+                    FmReceiver.FM_CHSPACE_100_KHZ);
+            config.setRdsStd(
+                    FmReceiver.FM_RDS_STD_RDS);
+            config.setLowerLimit(87500);
+            config.setUpperLimit(108000);
+
+            Log.i(TAG, "FM region: Europe / International; " +
+                    "87500-108000 kHz, 100 kHz, 50 us, RDS");
+        } else {
+            /*
+             * North American configuration.
+             */
+            config.setRadioBand(
+                    FmReceiver.FM_US_BAND);
+            config.setEmphasis(
+                    FmReceiver.FM_DE_EMP75);
+            config.setChSpacing(
+                    FmReceiver.FM_CHSPACE_200_KHZ);
+            config.setRdsStd(
+                    FmReceiver.FM_RDS_STD_RBDS);
+            config.setLowerLimit(87500);
+            config.setUpperLimit(107900);
+
+            Log.i(TAG, "FM region: North America; " +
+                    "87500-107900 kHz, 200 kHz, 75 us, RBDS");
+        }
 
         return config;
     }

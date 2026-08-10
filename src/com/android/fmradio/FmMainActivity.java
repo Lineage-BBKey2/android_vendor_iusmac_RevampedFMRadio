@@ -735,6 +735,17 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
      */
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
+        int fmRegion = FmUtils.getFmRegion(mContext);
+
+        menu.findItem(R.id.fm_region_north_america)
+                .setChecked(
+                        fmRegion ==
+                        FmUtils.FM_REGION_NORTH_AMERICA);
+
+        menu.findItem(R.id.fm_region_world_europe)
+                .setChecked(
+                        fmRegion ==
+                        FmUtils.FM_REGION_WORLD_EUROPE);
         if (null == mService) {
             Log.d(TAG, "onPrepareOptionsMenu, mService is null");
             return true;
@@ -744,6 +755,8 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         boolean isPowerdown = (powerStatus == FmService.POWER_DOWN);
         boolean isSeeking = mService.isSeeking();
         boolean isSpeakerUsed = mService.isSpeakerUsed();
+        menu.findItem(R.id.fm_region)
+                .setEnabled(isPowerdown);
         // if fm power down by other app, should enable power menu, make it to
         // powerup.
         refreshActionMenuItem(isSeeking ? false : isPowerUp);
@@ -779,8 +792,19 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
             invalidateOptionsMenu();
         } else if (itemId == R.id.speaker_menu) {
             setSpeakerPhoneOn(true);
-            mMenuItemHeadset.setIcon(R.drawable.btn_fm_speaker_selector);
+            mMenuItemHeadset.setIcon(
+                    R.drawable.btn_fm_speaker_selector);
             invalidateOptionsMenu();
+        } else if (itemId ==
+                R.id.fm_region_north_america) {
+            selectFmRegion(
+                    FmUtils.FM_REGION_NORTH_AMERICA);
+            return true;
+        } else if (itemId ==
+                R.id.fm_region_world_europe) {
+            selectFmRegion(
+                    FmUtils.FM_REGION_WORLD_EUROPE);
+            return true;
         } else if (itemId == R.id.fm_start_record) {
             Intent recordIntent = new Intent(this, FmRecordActivity.class);
             recordIntent.putExtra(FmStation.CURRENT_STATION, mCurrentStation);
@@ -1113,6 +1137,55 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
                       // audio headset) is disconnected
                       !mService.isAudioDeviceAvailable(preferredDevice))));
         }
+    }
+
+    private void selectFmRegion(int region) {
+        /*
+         * FmConfig is applied when the receiver is enabled. Do not change
+         * the preference underneath an already-enabled receiver.
+         */
+        if (mService != null &&
+                mService.getPowerStatus() !=
+                        FmService.POWER_DOWN) {
+            showToast(getString(
+                    R.string.fm_region_power_down_required));
+            return;
+        }
+
+        int oldRegion = FmUtils.getFmRegion(mContext);
+
+        if (oldRegion == region) {
+            invalidateOptionsMenu();
+            return;
+        }
+
+        FmUtils.setFmRegion(mContext, region);
+
+        /*
+         * 108.0 MHz is valid in the international profile but outside the
+         * North American 87.5-107.9 MHz configuration. Reset the saved
+         * station if it cannot be used in the newly selected band.
+         */
+        if (!FmUtils.isValidStationForRegion(
+                mCurrentStation, region)) {
+            mCurrentStation = FmUtils.DEFAULT_STATION;
+
+            FmStation.setCurrentStation(
+                    mContext, mCurrentStation);
+
+            if (mService != null) {
+                mService.setFrequency(mCurrentStation);
+            }
+
+            refreshStationUI(mCurrentStation);
+        }
+
+        Log.i(TAG, "Selected FM region: " +
+                (region == FmUtils.FM_REGION_NORTH_AMERICA
+                        ? "North America"
+                        : "Europe / International"));
+
+        invalidateOptionsMenu();
     }
 
     private void initUiComponent() {

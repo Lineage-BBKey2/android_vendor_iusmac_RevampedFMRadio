@@ -44,4 +44,21 @@
         android:id="@+id/fm_record_list"
         android:showAsAction ="never"
         android:title="@string/fm_over_record_list" />
+    <item
+        android:id="@+id/fm_region"
+        android:showAsAction="never"
+        android:title="@string/fm_region_title">
+        <menu>
+            <group android:checkableBehavior="single">
+                <item
+                    android:id="@+id/fm_region_north_america"
+                    android:checkable="true"
+                    android:title="@string/fm_region_north_america" />
+                <item
+                    android:id="@+id/fm_region_world_europe"
+                    android:checkable="true"
+                    android:title="@string/fm_region_world_europe" />
+            </group>
+        </menu>
+    </item>
 </menu>

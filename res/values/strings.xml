@@ -131,4 +131,10 @@
 
     <!-- Font family for notification artwork text -->
     <string name="fm_notification_artwork_font_family" translatable="false">roboto</string>
+
+    <!-- FM region strings -->
+    <string name="fm_region_title">FM regional band</string>
+    <string name="fm_region_north_america">North America (200 kHz)</string>
+    <string name="fm_region_world_europe">Europe / International (100 kHz)</string>
+    <string name="fm_region_power_down_required">Turn off FM before changing the regional band.</string>
 </resources>

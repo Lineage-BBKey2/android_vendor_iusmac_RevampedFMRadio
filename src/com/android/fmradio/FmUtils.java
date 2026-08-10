@@ -53,6 +53,13 @@ public class FmUtils {
     // FM station variables
     public static final int DEFAULT_STATION = 1000;
     public static final float DEFAULT_STATION_FLOAT = computeFrequency(DEFAULT_STATION);
+
+    // Supported regional configurations.
+    public static final int FM_REGION_NORTH_AMERICA = 0;
+    public static final int FM_REGION_WORLD_EUROPE = 1;
+
+    private static final String FM_REGION = "fm_region";
+
     // maximum station frequency
     private static final int HIGHEST_STATION = 1080;
     // minimum station frequency
@@ -156,6 +163,56 @@ public class FmUtils {
         float frequency = (float) station / CONVERT_RATE;
         DecimalFormat decimalFormat = new DecimalFormat("0.0");
         return decimalFormat.format(frequency);
+    }
+
+    /**
+     * Return the selected FM regional configuration.
+     *
+     * North America remains the default to preserve existing behavior.
+     */
+    public static int getFmRegion(Context context) {
+        SharedPreferences prefs =
+                PreferenceManager.getDefaultSharedPreferences(context);
+
+        int region = prefs.getInt(
+                FM_REGION, FM_REGION_NORTH_AMERICA);
+
+        if (region != FM_REGION_NORTH_AMERICA &&
+                region != FM_REGION_WORLD_EUROPE) {
+            return FM_REGION_NORTH_AMERICA;
+        }
+
+        return region;
+    }
+
+    /**
+     * Store the selected FM regional configuration.
+     */
+    public static void setFmRegion(Context context, int region) {
+        if (region != FM_REGION_NORTH_AMERICA &&
+                region != FM_REGION_WORLD_EUROPE) {
+            return;
+        }
+
+        SharedPreferences prefs =
+                PreferenceManager.getDefaultSharedPreferences(context);
+
+        prefs.edit()
+                .putInt(FM_REGION, region)
+                .apply();
+    }
+
+    /**
+     * Check whether a saved station is inside the selected regional band.
+     */
+    public static boolean isValidStationForRegion(
+            int station, int region) {
+        int upperStation = region == FM_REGION_NORTH_AMERICA
+                ? 1079
+                : HIGHEST_STATION;
+
+        return station >= LOWEST_STATION &&
+                station <= upperStation;
     }
 
     /**

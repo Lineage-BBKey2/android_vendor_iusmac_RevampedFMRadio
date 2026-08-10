@@ -212,6 +212,21 @@ public class FmStation {
     public static int getCurrentStation(Context context) {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
         int currentStation = prefs.getInt(CURRENT_STATION, FmUtils.DEFAULT_STATION);
+        int region = FmUtils.getFmRegion(context);
+
+        /*
+         * A saved frequency may fall outside the selected regional band,
+         * particularly 108.0 MHz when North America is selected.
+         */
+        if (!FmUtils.isValidStationForRegion(
+                currentStation, region)) {
+            currentStation = FmUtils.DEFAULT_STATION;
+
+            prefs.edit()
+                    .putInt(CURRENT_STATION, currentStation)
+                    .apply();
+        }
+
         return currentStation;
     }
 
