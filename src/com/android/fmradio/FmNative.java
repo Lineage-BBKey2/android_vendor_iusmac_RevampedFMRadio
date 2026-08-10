@@ -95,6 +95,12 @@ public class FmNative {
     private static final int RDS_EVT_PS_UPDATE = 0x0008;
     private static final int RDS_EVT_RT_UPDATE = 0x0040;
 
+    /*
+     * Whether Revamped currently expects Qualcomm RDS callbacks to be
+     * processed. Guarded by EVENT_LOCK.
+     */
+    private static boolean sRdsProcessingEnabled;
+
     private static int sRdsEvents;
 
     private static byte[] sPs = new byte[0];
@@ -243,6 +249,15 @@ public class FmNative {
     private static void queuePsUpdate(String ps) {
         synchronized (EVENT_LOCK) {
             /*
+             * Qualcomm may continue delivering queued RDS events after the
+             * decoder has been disabled, particularly during seek and scan.
+             */
+            if (!sRdsProcessingEnabled) {
+                Log.d(TAG,
+                        "RDS PS update ignored while processing is disabled");
+                return;
+            }
+            /*
              * If Qualcomm returns to the value which is already displayed
              * while another value is still pending, consider the pending
              * value transient and discard it.
@@ -375,6 +390,15 @@ public class FmNative {
     private static void queueRtUpdate(String rt) {
         synchronized (EVENT_LOCK) {
             /*
+             * Ignore queued or scan-generated RadioText while Revamped has
+             * disabled RDS processing.
+             */
+            if (!sRdsProcessingEnabled) {
+                Log.d(TAG,
+                        "RDS RT update ignored while processing is disabled");
+                return;
+            }
+            /*
              * An identical pending callback adds no new information and
              * should not extend the quiet-period timer.
              */
@@ -416,6 +440,32 @@ public class FmNative {
 
         sPendingRt = null;
         sPublishedRt = null;
+    }
+
+    /*
+     * Disable compatibility-layer RDS processing and discard all pending
+     * and published RDS state.
+     *
+     * EVENT_LOCK must already be held.
+     */
+    private static void clearRdsStateLocked() {
+        sRdsProcessingEnabled = false;
+
+        resetPsStabilizerLocked();
+        resetRtStabilizerLocked();
+
+        sRdsEvents = 0;
+        sPs = new byte[0];
+        sRt = new byte[0];
+    }
+
+    /*
+     * Return whether Qualcomm RDS callbacks should currently be accepted.
+     */
+    private static boolean isRdsProcessingEnabled() {
+        synchronized (EVENT_LOCK) {
+            return sRdsProcessingEnabled;
+        }
     }
 
     private static final FmRxEvCallbacksAdaptor sCallbacks =
@@ -506,6 +556,17 @@ public class FmNative {
         public void FmRxEvRdsPsInfo() {
             Log.d(TAG, "FmRxEvRdsPsInfo");
 
+            /*
+             * Avoid querying and logging scan-station RDS when Revamped has
+             * explicitly disabled RDS processing. queuePsUpdate() checks again
+             * under EVENT_LOCK to close a possible disable race.
+             */
+            if (!isRdsProcessingEnabled()) {
+                Log.d(TAG,
+                        "RDS PS callback ignored while processing is disabled");
+                return;
+            }
+
             final FmReceiver receiver = sReceiver;
             if (receiver == null) {
                 return;
@@ -534,6 +595,16 @@ public class FmNative {
             public void FmRxEvRdsRtInfo() {
                 Log.d(TAG, "FmRxEvRdsRtInfo");
 
+                /*
+                 * Avoid retrieving scan-station RadioText while RDS processing is
+                 * disabled. queueRtUpdate() performs the authoritative locked check.
+                 */
+                if (!isRdsProcessingEnabled()) {
+                    Log.d(TAG,
+                            "RDS RT callback ignored while processing is disabled");
+                    return;
+                }
+
                 final FmReceiver receiver = sReceiver;
                 if (receiver == null) {
                     return;
@@ -560,13 +631,20 @@ public class FmNative {
             public void FmRxEvRdsAfInfo() {
                 Log.d(TAG, "FmRxEvRdsAfInfo");
 
+                if (!isRdsProcessingEnabled()) {
+                    Log.d(TAG,
+                            "RDS AF callback ignored while processing is disabled");
+                    return;
+                }
+
                 /*
                  * This callback reports an AF list update. It is not the same
                  * thing as Revamped's RDS_EVT_AF_JUMP, so don't expose it as
                  * an AF-jump event yet.
                  */
-                if (sReceiver != null) {
-                    sReceiver.getAFInfo();
+                final FmReceiver receiver = sReceiver;
+                if (receiver != null) {
+                    receiver.getAFInfo();
                 }
             }
     };
@@ -866,6 +944,10 @@ public class FmNative {
     static boolean closeDev() {
         Log.d(TAG, "closeDev");
 
+        synchronized (EVENT_LOCK) {
+            clearRdsStateLocked();
+        }
+
         sReceiver = null;
         sFmConfig = null;
         sCurrentFrequencyKhz = 0;
@@ -976,6 +1058,7 @@ public class FmNative {
         Log.d(TAG, "powerDown");
 
         synchronized (EVENT_LOCK) {
+            clearRdsStateLocked();
             sDisableDone = false;
         }
 
@@ -1209,29 +1292,38 @@ public class FmNative {
      * callback-driven qcom.fmradio implementation.
      */
     static int setRds(boolean rdson) {
-        if (sReceiver == null) {
-            return -1;
-        }
-
         if (!rdson) {
             /*
-             * Revamped may disable RDS without powering the FM receiver down,
-             * such as around a seek or tune. Stop Qualcomm's RDS processing so
-             * stale decoder state is not carried across the transition.
+             * Close the compatibility-layer gate before sending the hardware
+             * command. Qualcomm can continue delivering queued callbacks while
+             * unregisterRdsGroupProcessing() is executing or even after it
+             * returns.
              */
-            boolean result = sReceiver.unregisterRdsGroupProcessing();
-
             synchronized (EVENT_LOCK) {
-                resetPsStabilizerLocked();
-                resetRtStabilizerLocked();
-
-                sRdsEvents = 0;
-                sPs = new byte[0];
-                sRt = new byte[0];
+                clearRdsStateLocked();
             }
+
+            final FmReceiver receiver = sReceiver;
+            if (receiver == null) {
+                Log.d(TAG, "setRds(false): no receiver");
+                return -1;
+            }
+
+            /*
+             * Revamped may disable RDS without powering the FM receiver down,
+             * such as around a seek, tune, or scan. Stop Qualcomm's RDS
+             * processing so decoder state is not carried across the transition.
+             */
+            boolean result =
+                    receiver.unregisterRdsGroupProcessing();
 
             Log.d(TAG, "setRds(false): " + result);
             return result ? 0 : -1;
+        }
+
+        final FmReceiver receiver = sReceiver;
+        if (receiver == null) {
+            return -1;
         }
 
         final int groups =
@@ -1243,10 +1335,22 @@ public class FmNative {
                 FmReceiver.FM_RX_RDS_GRP_PTYN_EBL |
                 FmReceiver.FM_RX_RDS_GRP_RT_PLUS_EBL;
 
-        boolean result = sReceiver.registerRdsGroupProcessing(groups);
+        boolean result =
+                receiver.registerRdsGroupProcessing(groups);
+
+        synchronized (EVENT_LOCK) {
+            if (result) {
+                /*
+                 * Open the gate only after Qualcomm accepts the requested
+                 * RDS group configuration.
+                 */
+                sRdsProcessingEnabled = true;
+            } else {
+                clearRdsStateLocked();
+            }
+        }
 
         Log.d(TAG, "setRds(true): " + result);
-
         return result ? 0 : -1;
     }
 
