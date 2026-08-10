@@ -28,7 +28,6 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
-import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Bundle;
@@ -125,6 +124,10 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
     private MenuItem mMenuItemStationlList = null;
 
     private MenuItem mMenuItemHeadset = null;
+
+    private MenuItem mMenuItemWiredEarphone = null;
+    private MenuItem mMenuItemSpeaker = null;
+    private MenuItem mMenuItemBluetooth = null;
 
     private MenuItem mMenuItemStartRecord = null;
 
@@ -233,10 +236,9 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
                     break;
 
                 case FmListener.MSGID_SWITCH_ANTENNA:
-                    bundle = msg.getData();
-                    boolean hasAntenna = bundle.getBoolean(FmListener.KEY_IS_SWITCH_ANTENNA);
-                    setMenuItemAudioIcon(!hasAntenna);
-                    refreshMenuItemAudio(hasAntenna);
+                    setMenuItemAudioIcon(mService.getAudioRoute());
+                    refreshMenuItemAudio(
+                            mService.getPowerStatus() == FmService.POWER_UP);
                     break;
 
                 case FmListener.MSGID_POWERDOWN_FINISHED:
@@ -298,10 +300,10 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
                     break;
 
                 case FmListener.LISTEN_SPEAKER_MODE_CHANGED:
-                    bundle = msg.getData();
-                    boolean isSpeakerMode = bundle.getBoolean(FmListener.KEY_IS_SPEAKER_MODE);
-                    setMenuItemAudioIcon(isSpeakerMode);
-                    refreshMenuItemAudio(!isSpeakerMode);
+                    setMenuItemAudioIcon(mService.getAudioRoute());
+                    refreshMenuItemAudio(
+                            mService.getPowerStatus() == FmService.POWER_UP);
+                    invalidateOptionsMenu();
                     break;
 
                 case FmListener.LISTEN_RECORDSTATE_CHANGED:
@@ -722,6 +724,9 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         inflater.inflate(R.menu.fm_action_bar, menu);
         mMenuItemStationlList = menu.findItem(R.id.fm_station_list);
         mMenuItemHeadset = menu.findItem(R.id.fm_headset);
+        mMenuItemWiredEarphone = menu.findItem(R.id.earphone_menu);
+        mMenuItemSpeaker = menu.findItem(R.id.speaker_menu);
+        mMenuItemBluetooth = menu.findItem(R.id.bluetooth_menu);
         mMenuItemStartRecord = menu.findItem(R.id.fm_start_record);
         mMenuItemRecordList = menu.findItem(R.id.fm_record_list);
         return true;
@@ -754,7 +759,6 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         boolean isPowerUp = (powerStatus == FmService.POWER_UP);
         boolean isPowerdown = (powerStatus == FmService.POWER_DOWN);
         boolean isSeeking = mService.isSeeking();
-        boolean isSpeakerUsed = mService.isSpeakerUsed();
         menu.findItem(R.id.fm_region)
                 .setEnabled(isPowerdown);
         // if fm power down by other app, should enable power menu, make it to
@@ -764,7 +768,7 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         refreshImageButton(isSeeking ? false : isPowerUp);
         refreshPlayButton(isSeeking ? false
                 : (isPowerUp || (isPowerdown && !mIsDisablePowerMenu)));
-        setMenuItemAudioIcon(isSpeakerUsed);
+        setMenuItemAudioIcon(mService.getAudioRoute());
         return true;
     }
 
@@ -787,14 +791,17 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
             // Show favorite activity.
             enterStationList();
         } else if (itemId == R.id.earphone_menu) {
-            setSpeakerPhoneOn(false);
-            mMenuItemHeadset.setIcon(R.drawable.btn_fm_headset_selector);
-            invalidateOptionsMenu();
+            selectAudioRoute(
+                    FmService.AUDIO_ROUTE_WIRED_EARPHONE);
+            return true;
         } else if (itemId == R.id.speaker_menu) {
-            setSpeakerPhoneOn(true);
-            mMenuItemHeadset.setIcon(
-                    R.drawable.btn_fm_speaker_selector);
-            invalidateOptionsMenu();
+            selectAudioRoute(
+                    FmService.AUDIO_ROUTE_SPEAKER);
+            return true;
+        } else if (itemId == R.id.bluetooth_menu) {
+            selectAudioRoute(
+                    FmService.AUDIO_ROUTE_BLUETOOTH);
+            return true;
         } else if (itemId ==
                 R.id.fm_region_north_america) {
             selectFmRegion(
@@ -954,12 +961,15 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         mService.powerDownAsync();
     }
 
-    private void setSpeakerPhoneOn(boolean isSpeaker) {
-        if (isSpeaker) {
-            mService.setSpeakerPhoneOn(true);
-        } else {
-            mService.setSpeakerPhoneOn(false);
+    private void selectAudioRoute(int audioRoute) {
+        if (!mService.setAudioRoute(audioRoute)) {
+            showToast(getString(R.string.not_available));
+            return;
         }
+
+        setMenuItemAudioIcon(mService.getAudioRoute());
+        refreshMenuItemAudio(true);
+        invalidateOptionsMenu();
     }
 
     /**
@@ -1098,7 +1108,6 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         boolean isDuringPowerup = (powerStatus == FmService.DURING_POWER_UP);
         boolean isSeeking = mService.isSeeking();
         boolean isPowerdown = (powerStatus == FmService.POWER_DOWN);
-        boolean isSpeakerUsed = mService.isSpeakerUsed();
         boolean fmStatus = (isSeeking || isDuringPowerup);
         // when seeking, all button should disabled,
         // else should update as origin status
@@ -1110,32 +1119,62 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
         Log.d(TAG, "updateMenuStatus.mIsDisablePowerMenu: " + mIsDisablePowerMenu);
         refreshPlayButton(fmStatus ? false
                 : (isPowerUp || (isPowerdown && !mIsDisablePowerMenu)));
-        setMenuItemAudioIcon(isSpeakerUsed);
+        setMenuItemAudioIcon(mService.getAudioRoute());
     }
 
-    private void setMenuItemAudioIcon(final boolean isSpeakerUsed) {
-        if (null != mMenuItemHeadset) {
-            mMenuItemHeadset.setIcon(isSpeakerUsed ?
-                    R.drawable.btn_fm_speaker_selector :
-                    R.drawable.btn_fm_headset_selector);
+    private void setMenuItemAudioIcon(final int audioRoute) {
+        if (mMenuItemHeadset == null) {
+            return;
         }
+
+        final int icon;
+
+        switch (audioRoute) {
+            case FmService.AUDIO_ROUTE_SPEAKER:
+                icon = R.drawable.btn_fm_speaker_selector;
+                break;
+
+            case FmService.AUDIO_ROUTE_BLUETOOTH:
+                icon = R.drawable.btn_fm_bluetooth_selector;
+                break;
+
+            case FmService.AUDIO_ROUTE_WIRED_EARPHONE:
+            default:
+                icon = R.drawable.btn_fm_headset_selector;
+                break;
+        }
+
+        mMenuItemHeadset.setIcon(icon);
     }
 
     private void refreshMenuItemAudio(final boolean enabled) {
-        if (null != mMenuItemHeadset) {
-            // If BT headset is in use or preferred device for media strategy is neither speaker nor
-            // headset (e.g., USB audio headset), need to disable speaker/earphone switching menu.
-            final int preferredDevice = mService.getPreferredDeviceForMediaStrategy();
-            mMenuItemHeadset.setEnabled(enabled &&
-                    mService.isHeadSetIn() &&
-                    (!mService.isBluetoothHeadsetInUse() &&
-                     (preferredDevice == AudioDeviceInfo.TYPE_UNKNOWN ||
-                      (preferredDevice == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER ||
-                      preferredDevice == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                      preferredDevice == AudioDeviceInfo.TYPE_WIRED_HEADSET) ||
-                      // If neither speaker or headset, ensure the preferred device (e.g., USB
-                      // audio headset) is disconnected
-                      !mService.isAudioDeviceAvailable(preferredDevice))));
+        if (mMenuItemHeadset == null || mService == null) {
+            return;
+        }
+
+        mMenuItemHeadset.setEnabled(enabled);
+
+        final int audioRoute = mService.getAudioRoute();
+
+        if (mMenuItemWiredEarphone != null) {
+            mMenuItemWiredEarphone.setEnabled(
+                    enabled && mService.isHeadSetIn());
+            mMenuItemWiredEarphone.setChecked(
+                    audioRoute
+                            == FmService.AUDIO_ROUTE_WIRED_EARPHONE);
+        }
+
+        if (mMenuItemSpeaker != null) {
+            mMenuItemSpeaker.setEnabled(enabled);
+            mMenuItemSpeaker.setChecked(
+                    audioRoute == FmService.AUDIO_ROUTE_SPEAKER);
+        }
+
+        if (mMenuItemBluetooth != null) {
+            mMenuItemBluetooth.setEnabled(
+                    enabled && mService.isBluetoothA2dpConnected());
+            mMenuItemBluetooth.setChecked(
+                    audioRoute == FmService.AUDIO_ROUTE_BLUETOOTH);
         }
     }
 

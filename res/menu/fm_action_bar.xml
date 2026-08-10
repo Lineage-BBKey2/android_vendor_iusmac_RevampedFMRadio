@@ -28,12 +28,23 @@
           android:icon="@drawable/btn_fm_speaker_selector"
           android:enabled="false">
           <menu>
-              <item android:id="@+id/earphone_menu"
-                    android:title="@string/optmenu_earphone"
-                    android:enabled="true"/>
-              <item android:id="@+id/speaker_menu"
-                    android:title="@string/optmenu_speaker"
-                    android:enabled="true"/>
+              <group android:checkableBehavior="single">
+                  <item
+                      android:id="@+id/earphone_menu"
+                      android:checkable="true"
+                      android:enabled="true"
+                      android:title="@string/optmenu_wired_earphone" />
+                  <item
+                      android:id="@+id/speaker_menu"
+                      android:checkable="true"
+                      android:enabled="true"
+                      android:title="@string/optmenu_speaker" />
+                  <item
+                      android:id="@+id/bluetooth_menu"
+                      android:checkable="true"
+                      android:enabled="true"
+                      android:title="@string/optmenu_bluetooth" />
+              </group>
           </menu>
     </item>
     <item

@@ -121,6 +121,21 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     // Notification channel
     public static final String NOTIFICATION_CHANNEL = "fmradio_notification_channel";
 
+    // Audio routing
+    public static final int AUDIO_ROUTE_WIRED_EARPHONE = 0;
+    public static final int AUDIO_ROUTE_SPEAKER = 1;
+    public static final int AUDIO_ROUTE_BLUETOOTH = 2;
+
+    private static final int AUDIO_ROUTE_AUTOMATIC = -1;
+
+    private int mSelectedAudioRoute = AUDIO_ROUTE_AUTOMATIC;
+
+    /*
+     * Apply the local Speaker route after a Bluetooth-disconnect power-down
+     * has completely stopped the PCM audio-session path.
+     */
+    private boolean mApplySpeakerRouteAfterBluetoothPowerDown;
+
     // ignore audio data
     private static final int AUDIO_FRAMES_TO_IGNORE_COUNT = 3;
 
@@ -225,6 +240,9 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     private final IBinder mBinder = new ServiceBinder();
     // Broadcast to receive the external event
     private FmServiceBroadcastReceiver mBroadcastReceiver = null;
+    private FmServiceBroadcastReceiver mBluetoothBroadcastReceiver = null;
+    private AudioDeviceAttributes mBluetoothAudioDevice;
+    private BluetoothDevice mBluetoothDevice;
     // Async handler
     private FmRadioServiceHandler mFmServiceHandler;
     // Lock for lose audio focus and receive SOUND_POWER_DOWN_MSG
@@ -324,13 +342,27 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
 
                 mIsSpeakerUsed = !isHeadSetIn();
 
-                // Avoid Service is killed,and receive headset plug in
-                // broadcast again
+                // Ignore the initial sticky headset broadcast while initializing.
                 if (!mIsServiceInited) {
                     Log.d(TAG, "onReceive, mIsServiceInited is false");
                     switchAntennaAsync(mValueHeadSetPlug);
                     return;
                 }
+
+                if (isHeadSetIn()) {
+                    /*
+                     * Android gives a newly inserted wired device priority. Reflect that
+                     * automatic route change in the application's selected-route state.
+                     */
+                    mSelectedAudioRoute = AUDIO_ROUTE_WIRED_EARPHONE;
+                } else if (mSelectedAudioRoute != AUDIO_ROUTE_BLUETOOTH) {
+                    /*
+                     * Return to the speaker when wired headphones are removed, unless
+                     * Bluetooth was explicitly selected.
+                     */
+                    mSelectedAudioRoute = AUDIO_ROUTE_SPEAKER;
+                }
+
                 /*
                  * If ear phone insert and activity is
                  * foreground. power up FM automatic
@@ -357,13 +389,59 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                     mFmServiceHandler.removeMessages(FmListener.MSGID_VOLUME_CHANGED);
                     mFmServiceHandler.sendMessage(msg);
                 }
+            } else if (BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED.equals(action)) {
+                final int state = intent.getIntExtra(
+                        BluetoothProfile.EXTRA_STATE,
+                        BluetoothProfile.STATE_DISCONNECTED);
+
+                /*
+                 * ACTION_ACTIVE_DEVICE_CHANGED can report a null active device while
+                 * A2DP remains physically connected, such as when wired headphones are
+                 * inserted. Only perform disconnect cleanup after the A2DP profile itself
+                 * has become disconnected.
+                 */
+                if (state == BluetoothProfile.STATE_DISCONNECTED
+                        && !isBluetoothA2dpConnected()) {
+                    Log.d(TAG, "A2DP profile disconnected");
+
+                    mBluetoothAudioDevice = null;
+                    mBluetoothDevice = null;
+
+                    if (mStrategyForMedia != null) {
+                        mAudioManager.removePreferredDeviceForStrategy(
+                                mStrategyForMedia);
+                    }
+
+                    /*
+                     * Reuse the existing active-device handler's null-device path to stop
+                     * the forced PCM session and fall back to wired headphones or speaker.
+                     */
+                    final Message msg = mFmServiceHandler.obtainMessage(
+                            FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED);
+
+                    msg.setData(new Bundle());
+
+                    mFmServiceHandler.removeMessages(
+                            FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED);
+                    mFmServiceHandler.sendMessage(msg);
+                }
                 // control FM power up when BT headset connected, force use audio session (if
                 // needed) and notify UI
             } else if (BluetoothA2dp.ACTION_ACTIVE_DEVICE_CHANGED.equals(action)) {
+                final BluetoothDevice device =
+                        intent.getParcelableExtra(
+                                BluetoothDevice.EXTRA_DEVICE,
+                                BluetoothDevice.class);
+
+                if (device != null) {
+                    rememberBluetoothAudioDevice(device);
+                }
+
                 final Message msg = mFmServiceHandler.obtainMessage(
                         FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED);
                 msg.setData(intent.getExtras());
-                mFmServiceHandler.removeMessages(FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED);
+                mFmServiceHandler.removeMessages(
+                        FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED);
                 mFmServiceHandler.sendMessage(msg);
             }
         }
@@ -452,7 +530,158 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      */
     public void setSpeakerPhoneOn(boolean isSpeaker) {
         Log.d(TAG, "setSpeakerPhoneOn " + isSpeaker);
-        setForceUse(isSpeaker, /*keepPreferredDeviceForMediaStrategy*/ false);
+        setAudioRoute(isSpeaker
+            ? AUDIO_ROUTE_SPEAKER
+            : AUDIO_ROUTE_WIRED_EARPHONE);
+    }
+
+    private void applyLocalAudioRoute(int audioRoute) {
+        final boolean useSpeaker =
+                audioRoute == AUDIO_ROUTE_SPEAKER;
+
+        mSelectedAudioRoute = audioRoute;
+
+        /*
+         * Remove any preferred media device and establish the requested local
+         * hardware route before stopping the Bluetooth PCM bridge.
+         */
+        setForceUse(
+                useSpeaker,
+                /* keepPreferredDeviceForMediaStrategy */ false);
+
+        if (!mUseAudioSession && mForceUseAudioSession) {
+            forceAudioSession(false);
+        }
+    }
+
+    public boolean setAudioRoute(int audioRoute) {
+        Log.d(TAG, "setAudioRoute " + audioRoute);
+
+        switch (audioRoute) {
+            case AUDIO_ROUTE_WIRED_EARPHONE:
+                if (!isHeadSetIn()) {
+                    Log.d(TAG,
+                            "Cannot select wired earphone: no wired device");
+                    return false;
+                }
+
+                applyLocalAudioRoute(AUDIO_ROUTE_WIRED_EARPHONE);
+                return true;
+
+            case AUDIO_ROUTE_SPEAKER:
+                applyLocalAudioRoute(AUDIO_ROUTE_SPEAKER);
+                return true;
+
+            case AUDIO_ROUTE_BLUETOOTH: {
+                if (!isBluetoothA2dpConnected()) {
+                    Log.d(TAG,
+                            "Cannot select Bluetooth: A2DP is not connected");
+                    return false;
+                }
+
+                /*
+                 * Recover both forms of the Bluetooth device when the service was
+                 * created while A2DP was already active.
+                 */
+                if (mBluetoothDevice == null
+                        || mBluetoothAudioDevice == null) {
+                    rememberBluetoothAudioDevice(null);
+                }
+
+                if (mBluetoothDevice == null) {
+                    Log.d(TAG,
+                            "Cannot select Bluetooth: no remembered BluetoothDevice");
+                    return false;
+                }
+
+                final BluetoothAdapter adapter =
+                        mBluetoothManager.getAdapter();
+
+                if (adapter == null || !adapter.isEnabled()) {
+                    Log.d(TAG,
+                            "Cannot select Bluetooth: adapter is unavailable");
+                    return false;
+                }
+
+                final List<BluetoothDevice> activeDevices =
+                        adapter.getActiveDevices(BluetoothProfile.A2DP);
+
+                if (!activeDevices.contains(mBluetoothDevice)) {
+                    /*
+                     * A wired device can leave A2DP profile-connected but inactive.
+                     * Reactivate the retained device first. The resulting
+                     * ACTION_ACTIVE_DEVICE_CHANGED callback will finish applying the
+                     * media-strategy preference and PCM audio-session route.
+                     */
+                    final boolean result;
+
+                    try {
+                        result = adapter.setActiveDevice(
+                                mBluetoothDevice,
+                                BluetoothAdapter.ACTIVE_DEVICE_AUDIO);
+                    } catch (SecurityException e) {
+                        Log.e(TAG,
+                                "Unable to make Bluetooth audio device active",
+                                e);
+                        return false;
+                    }
+
+                    Log.d(TAG,
+                            "Requested active Bluetooth audio device: " + result);
+                    return result;
+                }
+
+                /*
+                 * A2DP is already active, so the preferred media route can be applied
+                 * synchronously.
+                 */
+                if (!restoreBluetoothAudioRoute()) {
+                    return false;
+                }
+
+                /*
+                 * Do not advertise Bluetooth as selected until AudioManager has accepted
+                 * the corresponding preferred-device request.
+                 */
+                mSelectedAudioRoute = AUDIO_ROUTE_BLUETOOTH;
+                return true;
+            }
+
+            default:
+                Log.w(TAG, "Unknown audio route: " + audioRoute);
+                return false;
+        }
+    }
+
+    public int getAudioRoute() {
+        if (mSelectedAudioRoute != AUDIO_ROUTE_AUTOMATIC) {
+            return mSelectedAudioRoute;
+        }
+
+        final int preferredDevice =
+                getPreferredDeviceForMediaStrategy();
+
+        if (preferredDevice == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) {
+            return AUDIO_ROUTE_BLUETOOTH;
+        }
+
+        if (preferredDevice == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+            return AUDIO_ROUTE_SPEAKER;
+        }
+
+        if (preferredDevice == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                || preferredDevice
+                        == AudioDeviceInfo.TYPE_WIRED_HEADSET) {
+            return AUDIO_ROUTE_WIRED_EARPHONE;
+        }
+
+        if (mForceUseAudioSession && isBluetoothA2dpConnected()) {
+            return AUDIO_ROUTE_BLUETOOTH;
+        }
+
+        return mIsSpeakerUsed
+                ? AUDIO_ROUTE_SPEAKER
+                : AUDIO_ROUTE_WIRED_EARPHONE;
     }
 
     /**
@@ -461,15 +690,49 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      * @param devices a list of newly set preferred audio devices
      */
     @Override
-    public void onPreferredDevicesForStrategyChanged(final AudioProductStrategy strategy,
+    public void onPreferredDevicesForStrategyChanged(
+            final AudioProductStrategy strategy,
             final List<AudioDeviceAttributes> devices) {
+        final boolean isMediaStrategy =
+                strategy.getId() == mStrategyForMedia.getId();
 
-        final boolean isMediaStrategy = strategy.getId() == mStrategyForMedia.getId();
-        Log.d(TAG, "onPreferredDevicesForStrategyChanged, isMediaStrategy = " + isMediaStrategy +
-                " devices = " + devices);
+        Log.d(TAG,
+                "onPreferredDevicesForStrategyChanged, isMediaStrategy = "
+                        + isMediaStrategy + " devices = " + devices);
+
         if (isMediaStrategy && !devices.isEmpty()) {
             final boolean isSpeakerUsed = devices.stream()
-                .anyMatch((it) -> it.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
+                    .anyMatch((it) ->
+                            it.getType()
+                                    == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
+
+            final boolean isHeadsetUsed = devices.stream()
+                    .anyMatch((it) ->
+                            it.getType()
+                                    == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                            || it.getType()
+                                    == AudioDeviceInfo.TYPE_WIRED_HEADSET);
+
+            final boolean isBluetoothUsed = devices.stream()
+                    .anyMatch((it) ->
+                            it.getType()
+                                    == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP);
+
+            if (isBluetoothUsed) {
+                mSelectedAudioRoute = AUDIO_ROUTE_BLUETOOTH;
+            } else if (isSpeakerUsed) {
+                mSelectedAudioRoute = AUDIO_ROUTE_SPEAKER;
+            } else if (isHeadsetUsed) {
+                mSelectedAudioRoute = AUDIO_ROUTE_WIRED_EARPHONE;
+            }
+
+            for (AudioDeviceAttributes device : devices) {
+                if (device.getType()
+                        == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) {
+                    mBluetoothAudioDevice = device;
+                    break;
+                }
+            }
 
             // Note that, we'll use the audio session unconditionally when neither speaker nor
             // headset is used (it could be BT headset or USB headset). This is because devices
@@ -478,9 +741,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
             // session allows us to delegate FM audio processing to Android that will send audio to
             // any device
             if (!mUseAudioSession) {
-                final boolean isHeadsetUsed = devices.stream()
-                    .anyMatch((it) -> it.getType() == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
-                            || it.getType() == AudioDeviceInfo.TYPE_WIRED_HEADSET);
                 if (!isSpeakerUsed && !isHeadsetUsed) {
                     // Switch to audio session to play FM audio when neither speaker nor headset is
                     // used (e.g., BT headset or USB audio headset)
@@ -511,21 +771,29 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      *                          false - force FM device loopback over audio session.
      */
     private void forceAudioSession(final boolean forceAudioSession) {
-        Log.d(TAG, "forceAudioSession " + forceAudioSession);
+        synchronized (mAudioSessionRouteLock) {
+            Log.d(TAG, "forceAudioSession " + forceAudioSession);
 
-        if (isPlaying() && mIsAudioFocusHeld) {
-            if (mForceUseAudioSession != forceAudioSession) {
-                if (mIsFMDeviceLoopbackActive || !forceAudioSession) {
-                    // Disable audio session or FM device loopback when already playing
-                    enableFmAudio(false);
+            if (isPlaying() && mIsAudioFocusHeld) {
+                if (mForceUseAudioSession != forceAudioSession) {
+                    if (mIsFMDeviceLoopbackActive || !forceAudioSession) {
+                        /*
+                         * Disable the currently active audio-session or FM
+                         * hardware-loopback path before switching modes.
+                         */
+                        enableFmAudio(false);
+                    }
+
+                    mForceUseAudioSession = forceAudioSession;
+                    enableFmAudio(true);
                 }
+            } else {
+                /*
+                 * FM is not currently playing. Persist the mode that should
+                 * be used by the next power-up.
+                 */
                 mForceUseAudioSession = forceAudioSession;
-                enableFmAudio(true);
             }
-        } else {
-            // FM is not playing audio, cannot force now. Persist the flag that will be used on
-            // FM power up
-            mForceUseAudioSession = forceAudioSession;
         }
     }
 
@@ -534,10 +802,108 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      * @return true if current is playing with BT headset
      */
     public boolean isBluetoothHeadsetInUse() {
-        BluetoothAdapter btAdapter = mBluetoothManager.getAdapter();
-        int a2dpState = btAdapter.getProfileConnectionState(BluetoothProfile.HEADSET);
-        return (BluetoothProfile.STATE_CONNECTED == a2dpState
-                || BluetoothProfile.STATE_CONNECTING == a2dpState);
+        final BluetoothAdapter adapter = mBluetoothManager.getAdapter();
+
+        return adapter != null
+                && adapter.isEnabled()
+                && !adapter.getActiveDevices(BluetoothProfile.A2DP).isEmpty();
+    }
+
+    public boolean isBluetoothA2dpConnected() {
+        final BluetoothAdapter adapter = mBluetoothManager.getAdapter();
+
+        if (adapter == null || !adapter.isEnabled()) {
+            return false;
+        }
+
+        final int state =
+                adapter.getProfileConnectionState(BluetoothProfile.A2DP);
+
+        return state == BluetoothProfile.STATE_CONNECTED
+                || state == BluetoothProfile.STATE_CONNECTING;
+    }
+
+    private void rememberBluetoothAudioDevice(BluetoothDevice device) {
+        if (device != null) {
+            /*
+             * Retain the BluetoothDevice itself so it can be made active again
+             * after a wired output causes A2DP to become inactive.
+             */
+            mBluetoothDevice = device;
+        } else if (mBluetoothDevice == null) {
+            /*
+             * If the service starts while A2DP is already active, recover the
+             * active BluetoothDevice directly from BluetoothAdapter.
+             */
+            final BluetoothAdapter adapter = mBluetoothManager.getAdapter();
+
+            if (adapter != null && adapter.isEnabled()) {
+                final List<BluetoothDevice> activeDevices =
+                        adapter.getActiveDevices(BluetoothProfile.A2DP);
+
+                if (!activeDevices.isEmpty()) {
+                    mBluetoothDevice = activeDevices.get(0);
+                }
+            }
+        }
+
+        final AudioDeviceInfo[] devices =
+                mAudioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+
+        for (AudioDeviceInfo audioDevice : devices) {
+            if (audioDevice.getType()
+                    == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) {
+                mBluetoothAudioDevice =
+                        new AudioDeviceAttributes(audioDevice);
+
+                Log.d(TAG, "Remembered active Bluetooth audio device: "
+                        + mBluetoothAudioDevice);
+                return;
+            }
+        }
+
+        /*
+         * The active-device broadcast can arrive before AudioManager exposes the
+         * corresponding AudioDeviceInfo. Preserve the Bluetooth address as a
+         * fallback.
+         */
+        if (mBluetoothDevice != null) {
+            mBluetoothAudioDevice = new AudioDeviceAttributes(
+                    AudioDeviceAttributes.ROLE_OUTPUT,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    mBluetoothDevice.getAddress());
+
+            Log.d(TAG, "Remembered Bluetooth audio device from BluetoothDevice: "
+                    + mBluetoothAudioDevice);
+        }
+    }
+
+    private boolean restoreBluetoothAudioRoute() {
+        if (mStrategyForMedia == null || mBluetoothAudioDevice == null) {
+            Log.d(TAG, "Cannot restore Bluetooth route: no remembered device");
+            return false;
+        }
+
+        final boolean result =
+                mAudioManager.setPreferredDeviceForStrategy(
+                        mStrategyForMedia,
+                        mBluetoothAudioDevice);
+
+        Log.d(TAG, "restoreBluetoothAudioRoute: " + result);
+
+        if (result) {
+            if (!mUseAudioSession && !mForceUseAudioSession) {
+                forceAudioSession(true);
+            }
+
+            /*
+             * Clear any speaker/headset force while retaining the media-strategy
+             * preference that was just applied.
+             */
+            setForceUse(false);
+        }
+
+        return result;
     }
 
     /**
@@ -625,8 +991,17 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     private Thread mRenderThread = null;
     private AudioRecord mAudioRecord = null;
     private AudioTrack mAudioTrack = null;
+
+    /*
+     * Serializes transitions between FM hardware loopback and the PCM
+     * audio-session path. Route requests can arrive from both the activity
+     * thread and FmRadioServiceThread.
+     */
+    private final Object mAudioSessionRouteLock = new Object();
+
     private boolean mUseAudioSession;
-    private boolean mForceUseAudioSession;
+    private volatile boolean mForceUseAudioSession;
+
     private static final int SAMPLE_RATE = 44100;
     private static final int CHANNEL_CONFIG = AudioFormat.CHANNEL_CONFIGURATION_STEREO;
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
@@ -1504,12 +1879,30 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
         mUseAudioSession = SystemProperties.getBoolean("ro.vendor.fm.use_audio_session", false);
         Log.d(TAG, "onCreate, mUseAudioSession = " + mUseAudioSession);
 
-        registerFmBroadcastReceiver();
-        registerSdcardReceiver();
-
         HandlerThread handlerThread = new HandlerThread("FmRadioServiceThread");
         handlerThread.start();
         mFmServiceHandler = new FmRadioServiceHandler(handlerThread.getLooper());
+
+        registerFmBroadcastReceiver();
+        registerBluetoothBroadcastReceiver();
+        registerSdcardReceiver();
+
+        final boolean isBluetoothA2dpActive = isBluetoothHeadsetInUse();
+
+        if (isBluetoothA2dpActive) {
+            rememberBluetoothAudioDevice(null);
+
+            /*
+             * Hardware FM loopback cannot reach A2DP on devices without FM
+             * Bluetooth offload. Start with the PCM audio-session path instead.
+             */
+            mSelectedAudioRoute = AUDIO_ROUTE_BLUETOOTH;
+            mForceUseAudioSession = !mUseAudioSession;
+            mIsSpeakerUsed = false;
+        }
+
+        Log.d(TAG, "onCreate, isBluetoothA2dpActive = " + isBluetoothA2dpActive);
+        Log.d(TAG, "onCreate, mForceUseAudioSession = " + mForceUseAudioSession);
 
         if (mStrategyForMedia != null) {
             mAudioManager.addOnPreferredDevicesForStrategyChangedListener(
@@ -1527,7 +1920,10 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                 // preferred output device, but we can't seamlessly route to that device when using
                 // FM device loopback. The user can still select that device in the output selector,
                 // which will force start an audio session
-                mUseAudioSession || isSpeakerPreferredDevice || isHeadSetPreferredDevice);
+                mUseAudioSession
+                        || mForceUseAudioSession
+                        || isSpeakerPreferredDevice
+                        || isHeadSetPreferredDevice);
 
         setUpMediaSession();
 
@@ -1564,15 +1960,42 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
         if (!mUseAudioSession) {
             filter.addAction(AudioManager.VOLUME_CHANGED_ACTION);
         }
-        filter.addAction(BluetoothA2dp.ACTION_ACTIVE_DEVICE_CHANGED);
         mBroadcastReceiver = new FmServiceBroadcastReceiver();
         registerReceiver(mBroadcastReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
     }
 
+    private void registerBluetoothBroadcastReceiver() {
+        final IntentFilter filter = new IntentFilter();
+
+        filter.addAction(
+                BluetoothA2dp.ACTION_ACTIVE_DEVICE_CHANGED);
+        filter.addAction(
+                BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED);
+
+        mBluetoothBroadcastReceiver =
+                new FmServiceBroadcastReceiver();
+
+        /*
+         * Bluetooth broadcasts originate from a privileged process with a
+         * different UID, so this receiver must be exported. These actions are
+         * framework-protected broadcasts and cannot be spoofed by ordinary
+         * applications.
+         */
+        registerReceiver(
+                mBluetoothBroadcastReceiver,
+                filter,
+                Context.RECEIVER_EXPORTED);
+    }
+
     private void unregisterFmBroadcastReceiver() {
-        if (null != mBroadcastReceiver) {
+        if (mBroadcastReceiver != null) {
             unregisterReceiver(mBroadcastReceiver);
             mBroadcastReceiver = null;
+        }
+
+        if (mBluetoothBroadcastReceiver != null) {
+            unregisterReceiver(mBluetoothBroadcastReceiver);
+            mBluetoothBroadcastReceiver = null;
         }
     }
 
@@ -2671,7 +3094,8 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                 case FmListener.MSGID_POWERUP_FINISHED:
                     bundle = msg.getData();
                     handlePowerUp(bundle);
-                    mIsSpeakerUsed = !isHeadSetIn() || isSpeakerPhoneOn();
+                    mIsSpeakerUsed = !mForceUseAudioSession
+                            && (!isHeadSetIn() || isSpeakerPhoneOn());
                     break;
 
                 // power down
@@ -2725,9 +3149,12 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                         }
                     }
                     if (mForceUseAudioSession && !mIsSpeakerUsed) {
-                        // Stop audio session and switch to FM device loopback when headset inserted
+                        /*
+                         * Android gives a newly inserted wired output priority. Stop the PCM
+                         * bridge and return to the FM hardware-loopback path.
+                         */
                         forceAudioSession(false);
-                        setForceUse(mIsSpeakerUsed, false);
+                        setForceUse(false, false);
                     } else if (!mUseAudioSession && mIsSpeakerUsed && isBluetoothHeadsetInUse()) {
                         // Force use audio session when should use speaker (headphones/headset
                         // unplugged) and BT headset is present
@@ -2905,29 +3332,103 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                 case FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED:
                     bundle = msg.getData();
                     final boolean connected =
-                        bundle.getParcelable(BluetoothDevice.EXTRA_DEVICE,
+                        bundle.getParcelable(
+                                BluetoothDevice.EXTRA_DEVICE,
                                 BluetoothDevice.class) != null;
 
-                    // Power up automatically when BT headset connected
-                    if (connected && isActivityForeground() && mIsRecordingPermissible) {
-                        mFmServiceHandler.removeMessages(FmListener.MSGID_POWERUP_FINISHED);
-                        mFmServiceHandler.removeMessages(FmListener.MSGID_POWERDOWN_FINISHED);
-                        bundle = new Bundle(1);
-                        bundle.putFloat(FM_FREQUENCY, FmUtils.computeFrequency(mCurrentStation));
-                        handlePowerUp(bundle);
+                    if (connected) {
+                        /*
+                         * Making A2DP active is only the first half of the transition. Apply the
+                         * Bluetooth device as the preferred media output before changing the
+                         * application's selected-route state or starting FM audio.
+                         */
+                        if (!restoreBluetoothAudioRoute()) {
+                            Log.d(TAG,
+                                    "Bluetooth became active, but its media route could not be restored");
+                            break;
+                        }
+
+                        mSelectedAudioRoute = AUDIO_ROUTE_BLUETOOTH;
+
+                        /*
+                         * Power up only after the Bluetooth preference and PCM audio-session mode
+                         * have been established. If FM is already playing,
+                         * restoreBluetoothAudioRoute() performs the live transition.
+                         */
+                        if (!isPlaying()
+                                && isActivityForeground()
+                                && mIsRecordingPermissible) {
+                            mFmServiceHandler.removeMessages(
+                                    FmListener.MSGID_POWERUP_FINISHED);
+                            mFmServiceHandler.removeMessages(
+                                    FmListener.MSGID_POWERDOWN_FINISHED);
+
+                            bundle = new Bundle(1);
+                            bundle.putFloat(
+                                    FM_FREQUENCY,
+                                    FmUtils.computeFrequency(mCurrentStation));
+                            handlePowerUp(bundle);
+                        }
+                    } else {
+                        /*
+                         * A null active device does not necessarily mean that Bluetooth has
+                         * disconnected. Android also sends this transition when a wired
+                         * device takes priority.
+                         *
+                         * If Bluetooth was carrying FM audio and no wired output is present,
+                         * wait for the physical A2DP state before falling back. This avoids
+                         * leaking FM audio through the phone speaker during disconnection.
+                         */
+                        if (mSelectedAudioRoute == AUDIO_ROUTE_BLUETOOTH
+                                && !isHeadSetIn()) {
+                            if (isBluetoothA2dpConnected()) {
+                                Log.d(TAG,
+                                        "Bluetooth became inactive while A2DP remains connected");
+                                break;
+                            }
+
+                            if (isPlaying()) {
+                                Log.d(TAG,
+                                        "Stopping FM after Bluetooth audio disconnected");
+
+                                /*
+                                 * The next manual power-up should use the phone speaker, but
+                                 * do not activate that route until FM audio has stopped.
+                                 */
+                                mSelectedAudioRoute = AUDIO_ROUTE_SPEAKER;
+                                mApplySpeakerRouteAfterBluetoothPowerDown = true;
+
+                                /*
+                                 * Discard any redundant queued active-device transition before
+                                 * scheduling the normal FM power-down path.
+                                 */
+                                mFmServiceHandler.removeMessages(
+                                        FmListener.MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED);
+
+                                powerDownAsync();
+                                break;
+                            }
+                        }
+
+                        int fallbackRoute = mSelectedAudioRoute;
+
+                        /*
+                         * Preserve an explicit Speaker or Wired Earphone selection. Otherwise,
+                         * choose the appropriate local output when Bluetooth becomes inactive.
+                         */
+                        if (fallbackRoute != AUDIO_ROUTE_SPEAKER
+                                && fallbackRoute
+                                        != AUDIO_ROUTE_WIRED_EARPHONE) {
+                            fallbackRoute = isHeadSetIn()
+                                    ? AUDIO_ROUTE_WIRED_EARPHONE
+                                    : AUDIO_ROUTE_SPEAKER;
+                        }
+
+                        applyLocalAudioRoute(fallbackRoute);
                     }
 
-                    // Note that, we'll use the audio session unconditionally when BT headset
-                    // connected. This is because devices relying on the Audio HAL to route the FM
-                    // device loopback, most of the time lack the A2DP offload capability from the
-                    // vendor needed to process the FM output. Using audio session allows us to
-                    // delegate FM audio processing to Android that will send audio to the BT device
-                    if (!mUseAudioSession && mForceUseAudioSession != connected) {
-                        forceAudioSession(connected);
-                    }
-
-                    final boolean forceSpeaker = !connected && !isHeadSetIn();
-                    setForceUse(forceSpeaker);
+                    final boolean forceSpeaker =
+                            mSelectedAudioRoute == AUDIO_ROUTE_SPEAKER;
 
                     // Notify UI
                     bundle = new Bundle(2);
@@ -2968,8 +3469,23 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     private void handlePowerDown() {
         Bundle bundle;
         boolean isPowerdown = powerDown();
+
+        if (mApplySpeakerRouteAfterBluetoothPowerDown) {
+            mApplySpeakerRouteAfterBluetoothPowerDown = false;
+
+            if (isPowerdown) {
+                /*
+                 * FM and its PCM bridge are now stopped, so establish Speaker
+                 * as the route for the next power-up without leaking audio.
+                 */
+                mIsSpeakerUsed = true;
+                applyLocalAudioRoute(AUDIO_ROUTE_SPEAKER);
+            }
+        }
+
         bundle = new Bundle(1);
-        bundle.putInt(FmListener.CALLBACK_FLAG, FmListener.MSGID_POWERDOWN_FINISHED);
+        bundle.putInt(FmListener.CALLBACK_FLAG,
+                FmListener.MSGID_POWERDOWN_FINISHED);
         notifyActivityStateChanged(bundle);
     }
 

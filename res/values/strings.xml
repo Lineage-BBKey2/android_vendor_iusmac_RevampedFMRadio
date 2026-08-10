@@ -27,6 +27,10 @@
     <string name="optmenu_speaker">Speaker</string>
     <!-- Title of a menu item to change FM sound output to earphone [CHAR LIMIT=20] -->
     <string name="optmenu_earphone">Earphone</string>
+    <!-- Title of a menu item to change FM sound output to wired earphone [CHAR LIMIT=20] -->
+    <string name="optmenu_wired_earphone">Wired Earphone</string>
+    <!-- Title of a menu item to change FM sound output to bluetooth [CHAR LIMIT=20] -->
+    <string name="optmenu_bluetooth">Bluetooth</string>
     <!-- Dialog "Save" button to save a new station name [CHAR LIMIT=20] -->
     <string name="save">Save</string>
     <!-- Toast message shown when we record without sdcard [CHAR LIMIT=50] -->

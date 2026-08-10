@@ -575,8 +575,6 @@ public class FmFavoriteActivity extends Activity {
                     Toast.makeText(mContext, text, Toast.LENGTH_SHORT).show();
                     break;
                 case FmListener.MSGID_SWITCH_ANTENNA:
-                    bundle = msg.getData();
-                    boolean isHeadset = bundle.getBoolean(FmListener.KEY_IS_SWITCH_ANTENNA);
                     // nothing to do to UI since we're supporting wireless mode
                 default:
                     break;
