@@ -78,6 +78,16 @@
     <string name="fm_over_record_list">Saved recordings</string>
     <!-- Title of a menu item to refresh the station list  [CHAR LIMIT=30] -->
     <string name="fm_station_list_menu_refresh">Refresh</string>
+    <!-- Title of the dialog for directly entering an FM frequency [CHAR LIMIT=40] -->
+    <string name="tune_frequency_title">Tune to frequency</string>
+    <!-- Hint showing accepted direct-frequency input formats [CHAR LIMIT=40] -->
+    <string name="tune_frequency_hint">For example, 97.1 or 971</string>
+    <!-- Button that tunes to a directly entered frequency [CHAR LIMIT=20] -->
+    <string name="tune_frequency_action">Tune</string>
+    <!-- Error shown when direct-frequency input cannot be parsed [CHAR LIMIT=60] -->
+    <string name="tune_frequency_invalid">Enter a frequency such as 97.1 or 971</string>
+    <!-- Error shown when a frequency is outside the selected regional band [CHAR LIMIT=80] -->
+    <string name="tune_frequency_out_of_range">Frequency is outside the selected regional band</string>
     <!-- The tips shown when without an earphone or plug out the earphone [CHAR LIMIT=NONE] -->
     <string name="fm_no_headset_text">To start listening, plug in headphones (used as an antenna).</string>
     <!-- Actionbar title for station list. It will show in the action bar [CHAR LIMIT=50] -->

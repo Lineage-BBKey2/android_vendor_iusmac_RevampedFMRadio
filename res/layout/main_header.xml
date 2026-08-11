@@ -46,19 +46,6 @@
                 android:textSize="@dimen/text_fm_size" />
 
             <TextView
-                android:id="@+id/station_value"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_alignParentLeft="true"
-                android:layout_alignParentTop="true"
-                android:fontFamily="sans-serif-light"
-                android:gravity="left"
-                android:paddingLeft="16dip"
-                android:paddingTop="64dip"
-                android:textColor="@color/header_station_value_color"
-                android:textSize="@dimen/station_value_size" />
-
-            <TextView
                 android:id="@+id/station_name"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -87,6 +74,27 @@
                 android:singleLine="true"
                 android:textColor="@color/header_station_rds_color"
                 android:textSize="@dimen/station_rds_size" />
+<!--
+     Above and below text views use overlapping top padding for the
+     collapsible header. Keep the clickable frequency after the selectable
+     RT view so frequency taps take priority inside its visible region.
+-->
+            <TextView
+                android:id="@+id/station_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignParentLeft="true"
+                android:layout_alignParentTop="true"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:enabled="false"
+                android:focusable="true"
+                android:fontFamily="sans-serif-light"
+                android:gravity="left"
+                android:paddingLeft="16dip"
+                android:paddingTop="64dip"
+                android:textColor="@color/header_station_value_color"
+                android:textSize="@dimen/station_value_size" />
 
             <Toolbar
                 android:id="@+id/toolbar"

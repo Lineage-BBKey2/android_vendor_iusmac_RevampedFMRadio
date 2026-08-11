@@ -18,6 +18,7 @@ package com.android.fmradio;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.FragmentManager;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
@@ -34,16 +35,25 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
+import android.text.Editable;
+import android.text.InputFilter;
+import android.text.InputType;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.WindowManager;
 import android.view.animation.Animation;
 import android.view.animation.Animation.AnimationListener;
 import android.view.animation.AnimationUtils;
+import android.view.inputmethod.EditorInfo;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -59,6 +69,7 @@ import com.android.fmradio.views.FmSnackBar;
 import com.android.fmradio.views.FmScroller.EventListener;
 
 import java.lang.reflect.Field;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -192,7 +203,16 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
             } else if (viewId == R.id.button_prevstation) {
                 seekStation(mCurrentStation, false); // false: previous station
             } else if (viewId == R.id.button_nextstation) {
-                seekStation(mCurrentStation, true); // true: previous station
+                seekStation(mCurrentStation, true); // true: next station
+            } else if (viewId == R.id.station_value) {
+                if (mService == null
+                        || mService.getPowerStatus() != FmService.POWER_UP
+                        || mService.isSeeking()) {
+                    showToast(getString(R.string.not_available));
+                    return;
+                }
+
+                showTuneFrequencyDialog();
             } else if (viewId == R.id.play_button) {
                 if (mService.getPowerStatus() == FmService.POWER_UP) {
                     powerDownFm();
@@ -973,6 +993,286 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
     }
 
     /**
+     * Show a dialog for tuning directly to a frequency.
+     *
+     * Decimal entries are interpreted as MHz. Whole-number entries such as
+     * 88 or 105 are also interpreted as MHz, while shorthand entries such as
+     * 971 or 1053 represent 97.1 or 105.3 MHz.
+     */
+    private void showTuneFrequencyDialog() {
+        final View dialogView =
+                View.inflate(this, R.layout.alertdialog, null);
+
+        final TextView title = (TextView) dialogView.findViewById(
+                R.id.alertdialog_title);
+        final EditText frequencyEditor = (EditText) dialogView.findViewById(
+                R.id.alertdialog_edittext);
+        final Button tuneButton = (Button) dialogView.findViewById(
+                R.id.alertdialog_button_ok);
+        final Button cancelButton = (Button) dialogView.findViewById(
+                R.id.alertdialog_button_cancel);
+
+        title.setText(R.string.tune_frequency_title);
+
+        frequencyEditor.setInputType(
+                InputType.TYPE_CLASS_NUMBER
+                        | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        frequencyEditor.setSingleLine(true);
+        frequencyEditor.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        frequencyEditor.setHint(R.string.tune_frequency_hint);
+        frequencyEditor.setFilters(new InputFilter[] {
+                new InputFilter.LengthFilter(5)
+        });
+        frequencyEditor.setText(FmUtils.formatStation(mCurrentStation));
+
+        frequencyEditor.addTextChangedListener(new TextWatcher() {
+            private boolean mFormatting;
+
+            @Override
+            public void beforeTextChanged(
+                    CharSequence text, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(
+                    CharSequence text, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                if (mFormatting) {
+                    return;
+                }
+
+                /*
+                 * Clear an earlier validation error as soon as the user edits the
+                 * value again.
+                 */
+                frequencyEditor.setError(null);
+
+                final String formatted =
+                        formatFrequencyInputForDisplay(text.toString());
+
+                if (formatted == null
+                        || formatted.equals(text.toString())) {
+                    return;
+                }
+
+                mFormatting = true;
+
+                try {
+                    frequencyEditor.setText(formatted);
+                    frequencyEditor.setSelection(formatted.length());
+                } finally {
+                    mFormatting = false;
+                }
+            }
+        });
+
+        tuneButton.setText(R.string.tune_frequency_action);
+        cancelButton.setText(android.R.string.cancel);
+
+        final AlertDialog dialog =
+                new AlertDialog.Builder(this)
+                        .setView(dialogView)
+                        .create();
+
+        tuneButton.setOnClickListener((ignored) ->
+                tuneFromFrequencyInput(dialog, frequencyEditor));
+
+        cancelButton.setOnClickListener((ignored) ->
+                dialog.dismiss());
+
+        frequencyEditor.setOnEditorActionListener(
+                (view, actionId, event) -> {
+                    final boolean enterPressed =
+                            event != null
+                                    && event.getKeyCode()
+                                            == KeyEvent.KEYCODE_ENTER
+                                    && event.getAction()
+                                            == KeyEvent.ACTION_DOWN;
+
+                    if (actionId == EditorInfo.IME_ACTION_DONE
+                            || enterPressed) {
+                        tuneFromFrequencyInput(
+                                dialog, frequencyEditor);
+                        return true;
+                    }
+
+                    return false;
+                });
+
+        dialog.setOnShowListener((ignored) -> {
+            frequencyEditor.requestFocus();
+            frequencyEditor.selectAll();
+
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setSoftInputMode(
+                        WindowManager.LayoutParams
+                                .SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+            }
+        });
+
+        dialog.show();
+    }
+
+    /**
+     * Validate a frequency entry and start tuning when it is valid.
+     *
+     * @return true when a tune was started
+     */
+    private boolean tuneFromFrequencyInput(
+            AlertDialog dialog, EditText frequencyEditor) {
+        final Integer station = parseFrequencyInput(
+                frequencyEditor.getText().toString());
+
+        if (station == null) {
+            frequencyEditor.setError(
+                    getString(R.string.tune_frequency_invalid));
+            frequencyEditor.requestFocus();
+            return false;
+        }
+
+        final int region = FmUtils.getFmRegion(mContext);
+
+        if (!FmUtils.isValidStationForRegion(station, region)) {
+            frequencyEditor.setError(
+                    getString(R.string.tune_frequency_out_of_range));
+            frequencyEditor.requestFocus();
+            return false;
+        }
+
+        /*
+         * FM state may have changed while the dialog was open, for example
+         * because of audio-focus loss or Bluetooth disconnection.
+         */
+        if (mService == null
+                || mService.getPowerStatus() != FmService.POWER_UP
+                || mService.isSeeking()) {
+            dialog.dismiss();
+            showToast(getString(R.string.not_available));
+            return false;
+        }
+
+        dialog.dismiss();
+        tuneStation(station);
+        return true;
+    }
+
+    /**
+     * Add a decimal separator to unambiguous shorthand frequency input.
+     *
+     * Three-digit values beginning with 8 or 9 represent frequencies below
+     * 100 MHz. Four-digit values represent frequencies of 100 MHz or above.
+     *
+     * Values such as 100 through 108 remain unchanged because they may be
+     * complete whole-number frequencies or prefixes of four-digit shorthand.
+     */
+    private String formatFrequencyInputForDisplay(String input) {
+        if (TextUtils.isEmpty(input)
+                || input.indexOf('.') >= 0
+                || input.indexOf(',') >= 0
+                || !input.matches("\\d+")) {
+            return null;
+        }
+
+        final int length = input.length();
+        final boolean threeDigitShorthand =
+                length == 3
+                        && (input.charAt(0) == '8'
+                                || input.charAt(0) == '9');
+        final boolean fourDigitShorthand = length == 4;
+
+        if (!threeDigitShorthand && !fourDigitShorthand) {
+            return null;
+        }
+
+        return input.substring(0, length - 1)
+                + "."
+                + input.charAt(length - 1);
+    }
+
+    /**
+     * Convert user-entered MHz or shorthand digits into tenths of a MHz.
+     *
+     * Examples:
+     * 88    -> 880
+     * 97.1  -> 971
+     * 907   -> 907
+     * 100   -> 1000
+     * 1000  -> 1000
+     * 107.9 -> 1079
+     */
+    private Integer parseFrequencyInput(String input) {
+        if (TextUtils.isEmpty(input)) {
+            return null;
+        }
+
+        final String normalized =
+                input.trim().replace(',', '.');
+
+        if (TextUtils.isEmpty(normalized)) {
+            return null;
+        }
+
+        try {
+            if (normalized.indexOf('.') >= 0) {
+                /*
+                 * BigDecimal avoids floating-point truncation and intValueExact()
+                 * rejects frequencies that are not aligned to 0.1 MHz.
+                 */
+                return new BigDecimal(normalized)
+                        .movePointRight(1)
+                        .intValueExact();
+            }
+
+            final int value = Integer.valueOf(normalized);
+            final int length = normalized.length();
+
+            /*
+             * One- and two-digit entries are whole MHz values:
+             *
+             * 88 -> 88.0 MHz
+             * 95 -> 95.0 MHz
+             */
+            if (length <= 2) {
+                return Math.multiplyExact(value, 10);
+            }
+
+            /*
+             * Three digits beginning with 8 or 9 use shorthand notation:
+             *
+             * 907 -> 90.7 MHz
+             * 995 -> 99.5 MHz
+             *
+             * Other three-digit values are whole MHz values:
+             *
+             * 100 -> 100.0 MHz
+             * 105 -> 105.0 MHz
+             */
+            if (length == 3) {
+                final char firstDigit = normalized.charAt(0);
+
+                if (firstDigit == '8' || firstDigit == '9') {
+                    return value;
+                }
+
+                return Math.multiplyExact(value, 10);
+            }
+
+            /*
+             * Four-digit input is already in tenths-of-MHz units:
+             *
+             * 1000 -> 100.0 MHz
+             * 1053 -> 105.3 MHz
+             */
+            return value;
+        } catch (NumberFormatException | ArithmeticException e) {
+            return null;
+        }
+    }
+
+    /**
      * Tune a station
      *
      * @param station The tune station
@@ -1002,6 +1302,7 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
     }
 
     private void refreshImageButton(boolean enabled) {
+        mTextStationValue.setEnabled(enabled);
         mButtonDecrease.setEnabled(enabled);
         mButtonPrevStation.setEnabled(enabled);
         mButtonNextStation.setEnabled(enabled);
@@ -1262,6 +1563,7 @@ public class FmMainActivity extends Activity implements FmFavoriteEditDialog.Edi
     }
 
     private void registerButtonClickListener() {
+        mTextStationValue.setOnClickListener(mButtonClickListener);
         mButtonAddToFavorite.setOnClickListener(mButtonClickListener);
         mButtonDecrease.setOnClickListener(mButtonClickListener);
         mButtonIncrease.setOnClickListener(mButtonClickListener);
