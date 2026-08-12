@@ -83,6 +83,20 @@ public class FmNative {
     private static final long TUNE_TIMEOUT_MS = 5000;
     private static final long SEARCH_TIMEOUT_MS = 15000;
 
+    /*
+     * Qualcomm's FM HCI/data-handler transport continues settling briefly
+     * after the receiver-disable callback. Reconstructing FmReceiver too soon
+     * can produce a working tuner and RDS path with permanently silent audio.
+     */
+    private static final long FM_TRANSPORT_REINIT_DELAY_MS = 1500;
+
+    /*
+     * SystemClock timestamp of the most recent successful receiver disable.
+     * Volatile because the disable callback and later receiver construction
+     * can occur on different threads.
+     */
+    private static volatile long sLastFmDisableElapsedRealtime;
+
     private static final LinkedHashSet<Integer> sAutoScanStationsKhz =
             new LinkedHashSet<>();
 
@@ -910,6 +924,36 @@ public class FmNative {
         return completed;
     }
 
+    private static void waitForFmTransportCleanup() {
+        final long disabledAt =
+                sLastFmDisableElapsedRealtime;
+
+        if (disabledAt <= 0) {
+            return;
+        }
+
+        final long elapsed =
+                SystemClock.elapsedRealtime() - disabledAt;
+
+        /*
+         * A negative value is not expected within one process, but treating it
+         * as no pending cooldown is safer than sleeping after a clock reset.
+         */
+        if (elapsed < 0
+                || elapsed >= FM_TRANSPORT_REINIT_DELAY_MS) {
+            return;
+        }
+
+        final long remaining =
+                FM_TRANSPORT_REINIT_DELAY_MS - elapsed;
+
+        Log.d(TAG,
+                "Waiting " + remaining
+                + " ms for FM transport cleanup before re-init");
+
+        SystemClock.sleep(remaining);
+    }
+
     private static boolean createReceiverIfNeeded() {
         if (sReceiver != null) {
             return true;
@@ -919,6 +963,8 @@ public class FmNative {
             Log.e(TAG, "No context available to create FmReceiver");
             return false;
         }
+
+        waitForFmTransportCleanup();
 
         try {
             sReceiver = new FmReceiver(FM_DEVICE_PATH, sCallbacks);
@@ -1074,8 +1120,15 @@ public class FmNative {
              * Qualcomm's Helium backend tears down FM HCI/HAL during disable.
              * The FmReceiver must therefore be reconstructed before the next
              * enable.
+             *
+             * Start the transport cooldown only after the disable callback has
+             * been received successfully.
              */
-            Log.d(TAG, "FM disabled; discarding FmReceiver for re-init");
+            sLastFmDisableElapsedRealtime =
+                    SystemClock.elapsedRealtime();
+
+            Log.d(TAG,
+                    "FM disabled; transport cooldown started");
 
             sReceiver = null;
             sFmConfig = null;

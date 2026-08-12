@@ -121,6 +121,8 @@ public interface FmListener {
     int MSGID_SWITCH_LOW_POWER_MODE = 104;
 
     int MSGID_BLUETOOTH_ACTIVE_DEVICE_CHANGED = 105;
+    int MSGID_AUDIO_ROUTE_CHANGED = 106;
+    int MSGID_AUDIO_ROUTE_RESTART = 107;
 
     /**
      * Call back method to activity from service
