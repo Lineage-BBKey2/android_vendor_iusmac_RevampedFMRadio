@@ -151,4 +151,8 @@
     <string name="fm_region_north_america">North America (200 kHz)</string>
     <string name="fm_region_world_europe">Europe / International (100 kHz)</string>
     <string name="fm_region_power_down_required">Turn off FM before changing the regional band.</string>
+    <string name="location_permission_title">Refresh stations using location?</string>
+    <string name="location_permission_message">Approximate location lets FM Radio detect when you have moved more than 100 miles and reset location-specific station information before scanning. Every full scan updates the non-favorite station list to match the stations currently found. Favorites are preserved.</string>
+    <string name="location_permission_allow">Use approximate location</string>
+    <string name="location_permission_skip">Scan without location</string>
 </resources>

@@ -102,7 +102,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     // HandlerThread Keys
     private static final String FM_FREQUENCY = "frequency";
     private static final String OPTION = "option";
-    private static final String RECODING_FILE_NAME = "name";
 
     // RDS events
     // PS
@@ -239,8 +238,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
     private boolean mIsFmFavoriteForeground = false;
     // FmRecordActivity foreground
     private boolean mIsFmRecordForeground = false;
-    // Flag to check if recording permission is present
-    private boolean mIsRecordingPermissible = false;
     // Instance variables
     private Context mContext = null;
     private AudioManager mAudioManager = null;
@@ -388,8 +385,7 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                  * If ear phone insert and activity is
                  * foreground. power up FM automatic
                  */
-                if (isHeadSetIn() && isActivityForeground() &&
-                        mIsRecordingPermissible) {
+                if (isHeadSetIn() && isActivityForeground()) {
                     powerUpAsync(FmUtils.computeFrequency(mCurrentStation));
                 }
 
@@ -2268,24 +2264,17 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
      *
      * @param newName New recording file name
      */
-    public void saveRecordingAsync(String newName) {
-        mFmServiceHandler.removeMessages(FmListener.MSGID_SAVERECORDING_FINISHED);
-        final int bundleSize = 1;
-        Bundle bundle = new Bundle(bundleSize);
-        bundle.putString(RECODING_FILE_NAME, newName);
-        Message msg = mFmServiceHandler.obtainMessage(FmListener.MSGID_SAVERECORDING_FINISHED);
-        msg.setData(bundle);
-        mFmServiceHandler.sendMessage(msg);
-    }
-
-    private void saveRecording(String newName) {
+    public Uri finishRecording(String newName) {
         if (mFmRecorder != null) {
             if (newName != null) {
-                mFmRecorder.saveRecording(FmService.this, newName);
-                return;
+                Uri recordingUri = mFmRecorder.saveRecording(FmService.this, newName);
+                if (recordingUri != null) {
+                    return recordingUri;
+                }
             }
             mFmRecorder.discardRecording();
         }
+        return null;
     }
 
     /**
@@ -3522,9 +3511,11 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
         int firstValidstation = mCurrentStation;
 
         int stationNum = 0;
+        final boolean distanceExceed = mIsDistanceExceed;
+        mIsDistanceExceed = false;
         if (null != stations) {
             int searchedListSize = stations.length;
-            if (mIsDistanceExceed) {
+            if (distanceExceed) {
                 FmStation.cleanSearchedStations(mContext);
                 for (int j = 0; j < searchedListSize; j++) {
                     int freqSearched = stations[j];
@@ -3963,8 +3954,7 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                                 break;
                             }
 
-                            if (isActivityForeground()
-                                    && mIsRecordingPermissible) {
+                            if (isActivityForeground()) {
                                 mFmServiceHandler.removeMessages(
                                         FmListener.MSGID_POWERUP_FINISHED);
                                 mFmServiceHandler.removeMessages(
@@ -4052,11 +4042,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
                 case FmListener.MSGID_RECORD_MODE_CHANED:
                     bundle = msg.getData();
                     setRecordingMode(bundle.getBoolean(OPTION));
-                    break;
-
-                case FmListener.MSGID_SAVERECORDING_FINISHED:
-                    bundle = msg.getData();
-                    saveRecording(bundle.getString(RECODING_FILE_NAME));
                     break;
 
                 default:
@@ -4167,13 +4152,6 @@ public class FmService extends Service implements FmRecorder.OnRecorderStateChan
         mIsFmRecordForeground = isForeground;
     }
 
-    /**
-     * mark recording permission
-     * @param isPermissionEnabled
-     */
-    public void setRecordingPermission(boolean isPermissionEnabled) {
-        mIsRecordingPermissible = isPermissionEnabled;
-    }
 
     /**
      * Get the recording sdcard path when staring record

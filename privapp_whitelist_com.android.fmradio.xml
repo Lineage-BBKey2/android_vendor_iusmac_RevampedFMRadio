@@ -17,10 +17,16 @@
 <permissions>
     <privapp-permissions package="com.android.fmradio">
         <permission name="android.permission.ACCESS_BROADCAST_RADIO"/>
+        <permission name="android.permission.BLUETOOTH_PRIVILEGED" />
         <permission name="android.permission.CAPTURE_AUDIO_OUTPUT" />
         <permission name="android.permission.CAPTURE_TUNER_AUDIO_INPUT" />
         <permission name="android.permission.INTERACT_ACROSS_USERS"/>
         <permission name="android.permission.MODIFY_AUDIO_ROUTING"/>
+        <!--
+             Keep this unused allowlist entry as a dirty-upgrade guard. Older
+             parsed package metadata may still report the pre-MediaStore
+             manifest until PackageManager invalidates its generated cache.
+        -->
         <permission name="android.permission.MOUNT_UNMOUNT_FILESYSTEMS"/>
     </privapp-permissions>
 </permissions>

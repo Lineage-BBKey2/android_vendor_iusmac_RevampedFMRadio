@@ -105,7 +105,6 @@ public interface FmListener {
     int MSGID_STOPRECORDING_FINISHED = 23;
     int MSGID_STARTPLAYBACK_FINISHED = 24;
     int MSGID_STOPPLAYBACK_FINISHED = 25;
-    int MSGID_SAVERECORDING_FINISHED = 26;
     // Audio focus related
     int MSGID_AUDIOFOCUS_CHANGED = 30;
 

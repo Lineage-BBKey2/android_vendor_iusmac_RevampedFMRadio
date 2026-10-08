@@ -20,7 +20,6 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DialogFragment;
-import android.content.Context;
 import android.content.DialogInterface;
 import android.os.Bundle;
 import android.text.Editable;
@@ -35,10 +34,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.android.fmradio.FmRecorder;
-import com.android.fmradio.FmService;
 import com.android.fmradio.R;
-
-import java.io.File;
 
 /**
  * The dialog fragment for save recording file
@@ -61,12 +57,7 @@ public class FmSaveDialog extends DialogFragment {
 
     // The default filename need't to check whether exist
     private boolean mIsNeedCheckFilenameExist = false;
-    // record sd card path when start recording
-    private String mRecordingSdcard = null;
-
     private String mRecordingFileName = null;
-
-    private String mTempRecordingName = null;
 
     /**
      * FM record dialog fragment, because fragment manager need empty
@@ -80,12 +71,9 @@ public class FmSaveDialog extends DialogFragment {
      * FM record dialog fragment according name, should pass value recording
      * file name
      *
-     * @param defaultName The default file name in FileSystem
      * @param recordingName The name in the dialog for show and save
      */
-    public FmSaveDialog(String sdcard, String defaultName, String recordingName) {
-        mRecordingSdcard = sdcard;
-        mTempRecordingName = defaultName + FmRecorder.RECORDING_FILE_EXTENSION;
+    public FmSaveDialog(String recordingName) {
         mDefaultRecordingName = recordingName;
         mRecordingNameToSave = recordingName;
     }
@@ -105,7 +93,6 @@ public class FmSaveDialog extends DialogFragment {
         if (savedInstanceState != null) {
             mRecordingNameToSave = savedInstanceState.getString("record_file_name");
             mDefaultRecordingName = savedInstanceState.getString("record_default_name");
-            mRecordingSdcard = FmService.getRecordingSdcard();
         }
         setStyle(STYLE_NO_TITLE, 0);
         View view =  getActivity().getLayoutInflater().inflate(R.layout.alertdialog, null);
@@ -223,17 +210,11 @@ public class FmSaveDialog extends DialogFragment {
         @Override
         public void onClick(View v) {
 
-            Context ctx = v.getContext();
-            File recordingFolderPath = new File(mRecordingSdcard,
-                    FmRecorder.getFmRecordFolder(ctx));
-
             int viewId = v.getId();
             if (viewId == R.id.alertdialog_button_ok) {
                 String msg = null;
                 // Check the recording name whether exist
                 mRecordingNameToSave = mRecordingNameEditText.getText().toString().trim();
-                File recordingFileToSave = new File(recordingFolderPath, mRecordingNameToSave
-                                + FmRecorder.RECORDING_FILE_EXTENSION);
 
                 if (mRecordingNameToSave.equals(mDefaultRecordingName)) {
                     mIsNeedCheckFilenameExist = false;
@@ -241,7 +222,8 @@ public class FmSaveDialog extends DialogFragment {
                     mIsNeedCheckFilenameExist = true;
                 }
 
-                if (recordingFileToSave.exists() && mIsNeedCheckFilenameExist) {
+                if (mIsNeedCheckFilenameExist
+                        && FmRecorder.recordingExists(v.getContext(), mRecordingNameToSave)) {
                     // show a toast notification if can't renaming a file/folder
                     // to the same name
                     msg = mRecordingNameEditText.getText().toString() + " "
@@ -253,11 +235,6 @@ public class FmSaveDialog extends DialogFragment {
                 }
             } else if (viewId == R.id.alertdialog_button_cancel) {
                 dismissAllowingStateLoss();
-                // here need delete discarded recording file
-                File needToDelete = new File(recordingFolderPath, mTempRecordingName);
-                if (needToDelete.exists()) {
-                    needToDelete.delete();
-                }
             }
         }
     };

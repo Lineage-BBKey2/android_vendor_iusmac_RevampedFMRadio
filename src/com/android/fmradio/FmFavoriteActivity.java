@@ -79,6 +79,8 @@ public class FmFavoriteActivity extends Activity {
 
     private OnExitListener mExitListener = null;
 
+    private static final int PERMISSION_REQUEST_LOCATION = 101;
+
     private GridView mGridView;
 
     private MyFavoriteAdapter mMyAdapter;
@@ -88,8 +90,6 @@ public class FmFavoriteActivity extends Activity {
     private MenuItem mMenuRefresh = null;
 
     private LocationManager mLocationManager;
-
-    private Location mCurLocation;
 
     private boolean mIsActivityForeground = true;
 
@@ -179,36 +179,163 @@ public class FmFavoriteActivity extends Activity {
         if (itemId == android.R.id.home) {
             onBackPressed();
         } else if (itemId == R.id.fm_station_list_refresh) {
-            if (null != mService) {
-                refreshMenuItem(false);
-
-                mMyAdapter.swipResult(null);
-                mGridView.setEmptyView(mSearchTips);
-                mSearchProgress.setIndeterminate(true);
-
-                // If current location and last location exceed defined distance, delete the RDS database
-                if (isGpsOpen()) {
-                    mCurLocation = mLocationManager
-                            .getLastKnownLocation(LocationManager.GPS_PROVIDER);
-                    if (mCurLocation != null) {
-                        double[] lastLocations = FmUtils.getLastSearchedLocation(mContext);
-                        float distance[] = new float[2];
-                        Location.distanceBetween(lastLocations[0], lastLocations[1],
-                                mCurLocation.getLatitude(), mCurLocation.getLongitude(),
-                                distance);
-                        float searchedDistance = distance[0];
-                        boolean exceed =
-                                searchedDistance > FmUtils.LOCATION_DISTANCE_EXCEED;
-                        mService.setDistanceExceed(exceed);
-                        FmUtils.setLastSearchedLocation(mContext, mCurLocation.getLatitude(),
-                                mCurLocation.getLongitude());
-                    }
-                }
-
-                mService.startScanAsync();
-            }
+            requestStationListRefresh();
         }
         return super.onOptionsItemSelected(item);
+    }
+
+    /**
+     * Start a manual station-list refresh. Location is optional and is used
+     * only to decide whether geographically stale scanned stations should be
+     * replaced.
+     */
+    private void requestStationListRefresh() {
+        if (mService == null) {
+            return;
+        }
+
+        if (hasLocationPermission()) {
+            startStationListRefresh();
+            return;
+        }
+
+        new android.app.AlertDialog.Builder(this, getLocationDialogTheme())
+                .setTitle(R.string.location_permission_title)
+                .setMessage(R.string.location_permission_message)
+                .setPositiveButton(R.string.location_permission_allow,
+                        (dialog, which) -> requestPermissions(
+                                new String[] {
+                                        android.Manifest.permission.ACCESS_COARSE_LOCATION
+                                },
+                                PERMISSION_REQUEST_LOCATION))
+                .setNegativeButton(R.string.location_permission_skip,
+                        (dialog, which) -> startStationListRefresh())
+                .setOnCancelListener(dialog -> startStationListRefresh())
+                .show();
+    }
+
+    /**
+     * Refresh the station list, using the most recent available location when
+     * permission and a location provider are available.
+     */
+    private void startStationListRefresh() {
+        if (mService == null) {
+            return;
+        }
+
+        refreshMenuItem(false);
+        mMyAdapter.swipResult(null);
+        mGridView.setEmptyView(mSearchTips);
+        mSearchProgress.setIndeterminate(true);
+
+        // Never inherit the result of an earlier location comparison.
+        mService.setDistanceExceed(false);
+
+        Location currentLocation = getLastKnownStationLocation();
+        if (currentLocation != null) {
+            double[] lastLocation = FmUtils.getLastSearchedLocation(mContext);
+
+            // 0,0 is the preference default and means that no earlier
+            // location-assisted scan has been completed.
+            boolean hasLastLocation =
+                    lastLocation[0] != 0.0 || lastLocation[1] != 0.0;
+
+            if (hasLastLocation) {
+                float[] distance = new float[1];
+                Location.distanceBetween(
+                        lastLocation[0],
+                        lastLocation[1],
+                        currentLocation.getLatitude(),
+                        currentLocation.getLongitude(),
+                        distance);
+
+                mService.setDistanceExceed(
+                        distance[0] > FmUtils.LOCATION_DISTANCE_EXCEED);
+            }
+
+            FmUtils.setLastSearchedLocation(
+                    mContext,
+                    currentLocation.getLatitude(),
+                    currentLocation.getLongitude());
+        }
+
+        mService.startScanAsync();
+    }
+
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(
+                android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * AppThemeMain uses a light framework parent with night-qualified colors.
+     * Select the matching framework dialog theme explicitly so its background
+     * and text colors remain readable in both modes.
+     */
+    private int getLocationDialogTheme() {
+        int nightMode = getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+
+        return nightMode
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES
+                ? android.R.style.Theme_DeviceDefault_Dialog_Alert
+                : android.R.style.Theme_DeviceDefault_Light_Dialog_Alert;
+    }
+
+    /**
+     * Return the newest approximate last-known location available from the
+     * network or passive provider. This is sufficient for the 100-mile
+     * station-database comparison.
+     */
+    private Location getLastKnownStationLocation() {
+        if (!hasLocationPermission()) {
+            return null;
+        }
+
+        Location newestLocation = null;
+        newestLocation = newerLocation(
+                newestLocation,
+                getLastKnownLocation(LocationManager.NETWORK_PROVIDER));
+        newestLocation = newerLocation(
+                newestLocation,
+                getLastKnownLocation(LocationManager.PASSIVE_PROVIDER));
+
+        return newestLocation;
+    }
+
+    private Location getLastKnownLocation(String provider) {
+        try {
+            if (!mLocationManager.isProviderEnabled(provider)) {
+                return null;
+            }
+            return mLocationManager.getLastKnownLocation(provider);
+        } catch (IllegalArgumentException | SecurityException exception) {
+            Log.w(TAG, "Unable to read last-known location from "
+                    + provider, exception);
+            return null;
+        }
+    }
+
+    private Location newerLocation(Location current, Location candidate) {
+        if (candidate == null) {
+            return current;
+        }
+        if (current == null || candidate.getTime() > current.getTime()) {
+            return candidate;
+        }
+        return current;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+            String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == PERMISSION_REQUEST_LOCATION) {
+            // The scan proceeds even if Location was denied.
+            startStationListRefresh();
+        }
     }
 
     @Override
@@ -644,15 +771,4 @@ public class FmFavoriteActivity extends Activity {
         }
     };
 
-    /**
-     * check gps is open or not
-     *
-     * @return true is open
-     */
-    private boolean isGpsOpen() {
-        return checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED
-                && mLocationManager.isProviderEnabled(
-                        android.location.LocationManager.GPS_PROVIDER);
-    }
 }

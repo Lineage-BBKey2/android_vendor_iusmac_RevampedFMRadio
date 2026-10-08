@@ -33,8 +33,7 @@ LOCAL_JAVA_LIBRARIES += qcom.fmradio
 LOCAL_USES_LIBRARIES += qcom.fmradio
 
 LOCAL_REQUIRED_MODULES := \
-    privapp_whitelist_com.android.fmradio_revamped.xml \
-    RevampedFmRecordingsProvider \
+    privapp_whitelist_com.android.fmradio_revamped.xml
 
 # Ensure the Qualcomm FM framework/JNI runtime pieces are installed.
 # libqcomfm_jni is a system_ext library, so don't use

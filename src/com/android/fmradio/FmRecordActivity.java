@@ -47,7 +47,6 @@ import com.android.fmradio.FmStation.Station;
 import com.android.fmradio.dialogs.FmSaveDialog;
 import com.android.fmradio.views.FmVisualizerView;
 
-import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -374,9 +373,16 @@ public class FmRecordActivity extends Activity implements
         }
 
         if (recordingName != null && mService != null) {
-            mService.saveRecordingAsync(recordingName);
-            returnResult(recordingName, getString(R.string.toast_record_saved));
+            Uri recordingUri = mService.finishRecording(recordingName);
+            if (recordingUri != null) {
+                returnResult(recordingUri, getString(R.string.toast_record_saved));
+            } else {
+                returnResult(null, getString(R.string.toast_record_not_saved));
+            }
         } else {
+            if (mService != null) {
+                mService.finishRecording(null);
+            }
             returnResult(null, getString(R.string.toast_record_not_saved));
         }
         finish();
@@ -506,14 +512,12 @@ public class FmRecordActivity extends Activity implements
         }
     }
 
-    private void returnResult(String recordName, String resultString) {
+    private void returnResult(Uri recordingUri, String resultString) {
         Intent intent = new Intent();
         intent.putExtra(FmMainActivity.EXTRA_RESULT_STRING, resultString);
-        if (recordName != null) {
-            intent.setData(Uri.parse("file://" + FmService.getRecordingSdcard()
-                    + File.separator + Uri.encode(FmRecorder.getFmRecordFolder(mContext))
-                    + File.separator + Uri.encode(recordName)
-                    + FmRecorder.RECORDING_FILE_EXTENSION));
+        if (recordingUri != null) {
+            intent.setData(recordingUri);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         }
         setResult(RESULT_OK, intent);
     }
@@ -552,7 +556,6 @@ public class FmRecordActivity extends Activity implements
             Log.d(TAG, "showSaveDialog, activity is in background, show it later");
             return;
         }
-        String sdcard = FmService.getRecordingSdcard();
         String recordingName = mService.getRecordingName();
         String saveName = null;
         if (TextUtils.isEmpty(mStationName.getText())) {
@@ -564,7 +567,7 @@ public class FmRecordActivity extends Activity implements
                 .trim();
             saveName = FmRecorder.RECORDING_FILE_PREFIX + "_" + stationName + "_" + recordingName;
         }
-        FmSaveDialog newFragment = new FmSaveDialog(sdcard, recordingName, saveName);
+        FmSaveDialog newFragment = new FmSaveDialog(saveName);
         newFragment.show(mFragmentManager, TAG_SAVE_RECORDINGD);
         mFragmentManager.executePendingTransactions();
         mHandler.removeMessages(FmListener.MSGID_REFRESH);
